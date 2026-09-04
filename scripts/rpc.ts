@@ -190,14 +190,19 @@ export async function getLogsAdaptive(
       const splittable = /exceeds limit|timed out|timeout|unknown RPC|response size|too large|missing or invalid/i.test(msg);
       if (!splittable || hi - lo < 16n || depth > 24) throw e;
       const mid = lo + (hi - lo) / 2n;
-      return [...(await fetchRange(lo, mid, depth + 1)), ...(await fetchRange(mid + 1n, hi, depth + 1))];
+      const lower = await fetchRange(lo, mid, depth + 1);
+      const upper = await fetchRange(mid + 1n, hi, depth + 1);
+      return lower.concat(upper);
     }
   };
 
-  const out: any[] = [];
+  // Concatenated rather than spread: a busy contract returns hundreds of
+  // thousands of logs, and `push(...arr)` passes every one as an argument,
+  // which overflows the call stack long before memory becomes the problem.
+  let out: any[] = [];
   for (let lo = from; lo <= to; lo += step) {
     const hi = lo + step - 1n > to ? to : lo + step - 1n;
-    out.push(...(await fetchRange(lo, hi, 0)));
+    out = out.concat(await fetchRange(lo, hi, 0));
     await sleep(60);
   }
   return out;
