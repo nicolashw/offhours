@@ -46,26 +46,85 @@ body {
 .chainline { font: 400 13px/1.4 var(--mono); color: var(--dim); font-variant-numeric: tabular-nums; }
 .chainline b { color: var(--text); font-weight: 400; }
 
-/* ---------- hero: the trading day, and where we are in it ---------- */
+/* ---------- layer 0: the one thing a reader can ask about themselves ---------- */
 
-.hero { padding: 40px 0 34px; }
+.check { padding: 46px 0 40px; border-bottom: 1px solid var(--rule); }
 
-.verdict {
-  font: 500 clamp(26px, 3.4vw, 40px)/1.18 var(--cond);
-  letter-spacing: -0.015em;
-  max-width: 22ch;
-  margin: 0 0 10px;
+h1 {
+  font: 500 clamp(28px, 3.6vw, 42px)/1.14 var(--cond);
+  letter-spacing: -0.018em;
+  max-width: 20ch;
+  margin: 0 0 14px;
 }
-.verdict .live, .verdict .frozen { white-space: nowrap; }
-.verdict .live { color: var(--market); }
-.verdict .frozen { color: var(--ref); }
+.lede { color: var(--dim); max-width: 66ch; margin: 0 0 26px; }
+.lede code { color: var(--text); font: 400 0.92em var(--mono); }
 
-.verdict-sub { color: var(--dim); max-width: 62ch; margin: 0 0 30px; }
+.addr { display: flex; gap: 10px; flex-wrap: wrap; max-width: 640px; }
+.addr input {
+  flex: 1 1 340px; min-width: 0;
+  background: var(--panel); border: 1px solid var(--rule); color: var(--text);
+  font: 400 14px/1 var(--mono); padding: 13px 14px;
+}
+.addr input::placeholder { color: var(--dimmer); }
+.addr input:focus { outline: none; border-color: var(--market); }
+.addr button {
+  background: var(--market); border: 1px solid var(--market); color: #06121a;
+  font: 500 14px/1 var(--cond); letter-spacing: 0.01em; padding: 13px 22px; cursor: pointer;
+}
+.addr button:hover { filter: brightness(1.08); }
+.addr button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+
+.addr-hint { color: var(--dimmer); font-size: 13px; margin: 11px 0 0; }
+.linkish {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--market); font: inherit; text-decoration: underline; text-underline-offset: 3px;
+}
+
+.checking { color: var(--dim); margin: 26px 0 0; }
+
+.result { margin-top: 30px; border-top: 1px solid var(--rule); padding-top: 24px; }
+.result-top { display: flex; gap: 46px; flex-wrap: wrap; margin-bottom: 22px; }
+.result-top b { display: block; font: 500 32px/1 var(--cond); font-variant-numeric: tabular-nums; }
+.result-top span { color: var(--dim); font-size: 13px; }
+.result-top .miss b { color: var(--market); }
+.result-table tbody tr.corrected { box-shadow: inset 2px 0 0 var(--market); }
+.result-table tbody tr.corrected td:nth-child(3) { color: var(--market); }
+
+/* ---------- layer 1: three numbers ---------- */
+
+.tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 30px; border-top: 0; padding-top: 38px;
+}
+.tile b {
+  display: block; font: 500 clamp(26px, 2.6vw, 34px)/1 var(--cond);
+  font-variant-numeric: tabular-nums; margin-bottom: 9px;
+}
+.tile b.market { color: var(--market); }
+.tile b.ref { color: var(--ref); }
+.tile-label { display: block; font-size: 13.5px; margin-bottom: 4px; }
+.tile-sub { display: block; color: var(--dim); font-size: 12.5px; }
+
+/* ---------- layer 2: the mechanism ---------- */
 
 .daybar { width: 100%; height: 66px; display: block; }
 .daybar text { font: 400 11px var(--mono); fill: var(--dimmer); }
 .daybar .seg-label { font: 500 12px var(--cond); }
 .daybar .now-label { fill: var(--text); font-weight: 500; }
+
+.steps { counter-reset: s; list-style: none; margin: 30px 0 0; padding: 0; max-width: 78ch; }
+.steps li {
+  counter-increment: s; position: relative; padding: 0 0 14px 34px;
+  color: var(--dim); font-size: 14px;
+}
+.steps li::before {
+  content: counter(s); position: absolute; left: 0; top: 1px;
+  font: 500 12px/1.5 var(--mono); color: var(--market);
+  width: 20px; height: 20px; text-align: center; border: 1px solid var(--rule);
+}
+
+hr.divider { border: 0; border-top: 1px solid var(--rule); margin: 54px 0 0; }
+.divider-note { color: var(--dim); font-size: 13px; margin: 16px 0 -14px; }
 
 /* ---------- panels ---------- */
 
@@ -147,6 +206,11 @@ footer a { color: var(--dim); }
 @media (max-width: 620px) {
   .wrap { padding: 0 18px; }
   .name { display: none; }
+  .check { padding: 32px 0 30px; }
+  .addr input { flex-basis: 100%; }
+  .addr button { width: 100%; }
+  .result-top { gap: 26px; }
+  .tiles { gap: 24px; padding-top: 30px; }
 }
 
 /* ---------- true float ---------- */
@@ -162,3 +226,13 @@ footer a { color: var(--dim); }
 .legend b { color: var(--text); font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .float-verdict { color: var(--dim); font-size: 13.5px; max-width: 76ch; margin: 0; }
 .float-verdict b { color: var(--text); font-weight: 500; font-family: var(--mono); }
+
+.result-head { font: 500 16px var(--cond); margin: 0 0 12px; }
+.result-table.lead tbody tr { border-bottom-color: var(--rule); }
+.all-holdings { margin-top: 26px; }
+.all-holdings summary {
+  cursor: pointer; color: var(--dim); font: 500 13px var(--cond);
+  padding: 8px 0; border-top: 1px solid var(--rule-soft);
+}
+.all-holdings summary:hover { color: var(--text); }
+.all-holdings[open] summary { margin-bottom: 10px; }

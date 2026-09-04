@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OffHours — Robinhood Stock Tokens on chain</title>
-<meta name="description" content="What tokenized US equities are worth on chain while the market is shut: pool consensus against a frozen Chainlink reference, the depth behind it, and the multiplier that makes balanceOf lie.">
+<title>OffHours — what your Robinhood Stock Tokens are really worth</title>
+<meta name="description" content="Paste a wallet address and see the position your wallet is showing wrong. Plus every on-chain gap between tokenized equities and their reference price, net of what it costs to close.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
@@ -17,12 +17,31 @@
     <div class="wordmark">Off<span>Hours</span></div>
     <div class="chainline" id="chainline">reading the chain…</div>
   </header>
+</div>
 
-  <div class="hero">
-    <p class="verdict" id="verdict">&nbsp;</p>
-    <p class="verdict-sub" id="verdict-sub"></p>
-    <svg class="daybar" id="daybar" role="img" aria-label="US trading day, with the current moment marked"></svg>
-  </div>
+<!-- Layer 0. One question a reader can answer about themselves, in one paste. -->
+<div class="wrap">
+  <section class="check" id="check">
+    <h1 id="check-head">Your wallet is showing the wrong number.</h1>
+    <p class="lede" id="check-lede">
+      Robinhood Stock Tokens fold splits and dividends into a multiplier instead of changing
+      <code>balanceOf</code>. Every wallet that reads the raw balance is wrong by that factor —
+      right now a CrowdStrike holder is being shown a quarter of what they own.
+      Paste an address and see the real position.
+    </p>
+
+    <form class="addr" id="addr-form" autocomplete="off">
+      <input id="addr" name="address" spellcheck="false"
+             placeholder="0x… any address on Robinhood Chain" aria-label="Wallet address">
+      <button type="submit">Check holdings</button>
+    </form>
+    <p class="addr-hint">
+      Read-only: nothing is signed and no wallet is connected.
+      <button type="button" class="linkish" id="demo">See a wallet that holds all ten</button>
+    </p>
+
+    <div id="check-out"></div>
+  </section>
 </div>
 
 <main class="wrap" id="main">
@@ -30,6 +49,28 @@
 </main>
 
 <template id="tpl-body">
+  <!-- Layer 1. Three numbers that say what state the chain is in. -->
+  <section class="tiles" id="tiles"></section>
+
+  <!-- Layer 2. Why any of this exists. -->
+  <section>
+    <div class="panel-head"><h2>Why there is a gap at all</h2></div>
+    <p class="note" id="why-note"></p>
+    <svg class="daybar" id="daybar" role="img" aria-label="US trading day, with the current moment marked"></svg>
+    <ol class="steps" id="steps"></ol>
+  </section>
+
+  <!-- Layer 3. The last mile: what a gap is worth once it is paid for. -->
+  <section>
+    <div class="panel-head"><h2>Gaps open right now, after the toll</h2></div>
+    <p class="note" id="arb-note"></p>
+    <div class="scroll"><table id="t-arb"><thead></thead><tbody></tbody></table></div>
+    <p class="note" id="arb-foot"></p>
+  </section>
+
+  <hr class="divider">
+  <p class="divider-note">Everything below is the full measurement the numbers above are drawn from.</p>
+
   <section>
     <div class="panel-head"><h2>Where every priced token is trading against its reference</h2></div>
     <p class="note" id="band-note"></p>
@@ -44,8 +85,8 @@
   </section>
 
   <section>
-    <div class="panel-head"><h2>Where balanceOf lies</h2></div>
-    <p class="note">Stock Tokens carry an ERC-8056 <code>uiMultiplier()</code> that absorbs splits and distributions without moving <code>balanceOf</code>. A wallet reading the raw value for these tokens is showing the wrong position.</p>
+    <div class="panel-head"><h2>Every token whose multiplier is not 1.0</h2></div>
+    <p class="note">These are the tokens the checker at the top corrects for. A wallet reading <code>balanceOf</code> alone reports the left column; the holder owns the right one.</p>
     <div class="scroll"><table id="t-mult"><thead></thead><tbody></tbody></table></div>
   </section>
 
@@ -59,14 +100,16 @@
 
   <section>
     <div class="panel-head"><h2>What is actually covered</h2></div>
-    <p class="note">Most Stock Tokens have no on-chain reference price at all. For those the AMM is not commentary on a price — it is the only price there is, and no protocol can value them as collateral today.</p>
+    <p class="note">Most Stock Tokens have no on-chain reference price at all. For those the AMM is not commentary
+      on a price — it is the only price there is, and no protocol can value them as collateral today.</p>
     <div class="coverage" id="coverage"></div>
   </section>
 </template>
 
 <footer class="wrap">
-  Read-only. Prices come from Uniswap V3 and V4 pools on Robinhood Chain and from Chainlink reference feeds;
-  nothing here is a quote, an offer, or investment advice.
+  Read-only measurement of a public chain. Prices come from Uniswap V3 and V4 pools on Robinhood Chain and from
+  Chainlink reference feeds. Nothing here is a quote, an offer, a recommendation, or investment advice, and the
+  numbers move between the moment they are read and the moment you act on them.
   <a href="https://github.com/nicolashw/offhours">Source and findings log</a>.
 </footer>
 

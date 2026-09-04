@@ -90,28 +90,7 @@ function drawDayBar(snap) {
 
 // ---------------------------------------------------------------- hero copy
 
-function drawVerdict(snap) {
-  const withFeed = snap.rows.filter((r) => r.feed);
-  const ages = withFeed.map((r) => r.feed.ageSec).sort((a, b) => a - b);
-  const median = ages.length ? ages[Math.floor(ages.length / 2)] : 0;
-  const priced = snap.rows.filter((r) => r.quality === "ok");
-  const spread = priced.map((r) => r.premiumBps).filter((b) => b != null);
-  const widest = spread.length ? spread.reduce((a, b) => (Math.abs(b) > Math.abs(a) ? b : a)) : null;
-
-  if (snap.market.offHours) {
-    $("#verdict").innerHTML =
-      `The reference <span class="frozen">stopped ${fmtSpan(median)} ago</span>.<br>The chain <span class="live">kept trading</span>.`;
-    $("#verdict-sub").textContent =
-      `US equities are shut. Chainlink holds the last regular-session print for ${withFeed.length} tokens, `
-      + `while ${priced.length} of them keep clearing on Uniswap. `
-      + (widest == null ? "" : `The widest gap right now is ${fmtBps(widest)} bps — the market's implied move into the next open.`);
-  } else {
-    $("#verdict").innerHTML = `The market is <span class="live">open</span>.<br>Both prices are live.`;
-    $("#verdict-sub").textContent =
-      `The reference is tracking the underlying, so the gap below is a basis rather than an implied move. `
-      + `Median reference age ${fmtAge(median)} across ${withFeed.length} tokens.`;
-  }
-
+function drawChainline(snap) {
   $("#chainline").innerHTML =
     `Robinhood Chain <b>${snap.chainId}</b> · block <b>${Number(snap.block).toLocaleString("en-US")}</b> · `
     + `read <b>${new Date(snap.ts).toISOString().slice(11, 16)}Z</b>`;
@@ -313,7 +292,285 @@ function coverage(snap) {
   ].map((k) => `<div class="cov ${k.cls ?? ""}"><b>${k.n}</b><span>${k.s}</span></div>`).join("");
 }
 
+
+// ---------------------------------------------------------------- wallet checker
+//
+// The one thing on this page a reader can ask about themselves, and the reason
+// the page leads with it: every wallet on this chain reports balanceOf, and for
+// ten of these tokens balanceOf is not the position. Read-only — a batched
+// eth_call to the public RPC, no wallet connection and nothing signed.
+
+const RPC = "https://rpc.mainnet.chain.robinhood.com";
+const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
+const BALANCE_OF = "0x70a08231";
+const AGGREGATE3 = "0x82ad56cb";
+
+const w = (n) => BigInt(n).toString(16).padStart(64, "0");
+
+/**
+ * ABI-encode Multicall3.aggregate3((address,bool,bytes)[]).
+ *
+ * Hand-rolled rather than pulled from a library because the page ships as three
+ * files with no build step — and one eth_call is the only request shape this
+ * RPC serves reliably to a browser. Batched JSON-RPC arrays come back with a
+ * duplicated Access-Control-Allow-Origin header from one of its proxies, which
+ * the browser refuses, so 194 balances have to travel as one call.
+ */
+function encodeAggregate3(calls) {
+  const tuples = calls.map((c) => {
+    const d = c.data.replace(/^0x/, "");
+    const bytes = d.padEnd(Math.ceil(d.length / 64) * 64, "0");
+    return w(c.target) + w(1) + w(96) + w(d.length / 2) + bytes;
+  });
+  let acc = calls.length * 32;
+  const offsets = tuples.map((t) => { const o = acc; acc += t.length / 2; return w(o); });
+  return AGGREGATE3 + w(32) + w(calls.length) + offsets.join("") + tuples.join("");
+}
+
+function decodeAggregate3(hex) {
+  const h = hex.replace(/^0x/, "");
+  const word = (i) => h.slice(i * 64, i * 64 + 64);
+  const at = (i) => Number(BigInt("0x" + word(i))) / 32;
+  const base = at(0) + 1;
+  const len = Number(BigInt("0x" + word(base - 1)));
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    const t = base + at(base + i);
+    const bStart = t + at(t + 1);
+    const bLen = Number(BigInt("0x" + word(bStart)));
+    out.push({
+      success: BigInt("0x" + word(t)) === 1n,
+      data: "0x" + h.slice((bStart + 1) * 64, (bStart + 1) * 64 + bLen * 2),
+    });
+  }
+  return out;
+}
+
+async function ethCall(to, data) {
+  const r = await fetch(RPC, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "latest"] }),
+  }).then((x) => x.json());
+  if (r.error) throw new Error(r.error.message);
+  return r.result;
+}
+
+async function balancesOf(address, tokens) {
+  const owner = w(address);
+  const out = new Map();
+  for (let i = 0; i < tokens.length; i += 100) {
+    const slice = tokens.slice(i, i + 100);
+    const res = decodeAggregate3(await ethCall(
+      MULTICALL3, encodeAggregate3(slice.map((t) => ({ target: t.token, data: BALANCE_OF + owner }))),
+    ));
+    res.forEach((r, j) => {
+      if (!r.success || r.data === "0x") return;
+      const raw = BigInt(r.data);
+      if (raw > 0n) out.set(slice[j].symbol, raw);
+    });
+  }
+  return out;
+}
+
+/** 18-decimal fixed point to a JS number, without going through BigInt division. */
+const units = (raw, decimals) => Number(raw) / 10 ** decimals;
+
+async function runCheck(snap, address) {
+  const out = $("#check-out");
+  out.innerHTML = `<p class="checking">Reading ${snap.rows.length} token contracts…</p>`;
+  let held;
+  try {
+    held = await balancesOf(address, snap.rows);
+  } catch {
+    out.innerHTML = `<p class="checking">Could not reach the chain just now. Try again in a moment.</p>`;
+    return;
+  }
+
+  const rows = snap.rows
+    .filter((r) => held.has(r.symbol))
+    .map((r) => {
+      const raw = units(held.get(r.symbol), r.decimals);
+      const m = r.uiMultiplier ?? 1;
+      return { r, raw, real: raw * m, m, usd: r.poolUsd == null ? null : raw * m * r.poolUsd };
+    })
+    .sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0));
+
+  if (!rows.length) {
+    out.innerHTML = `<p class="checking">That address holds none of the ${snap.rows.length} Stock Tokens on this chain.</p>`;
+    return;
+  }
+
+  const total = rows.reduce((t, x) => t + (x.usd ?? 0), 0);
+  // Ordered by how wrong the raw number is, not by position size: a 4x split is
+  // the point being made, and a 6 bp distribution accrual is not.
+  const wrong = rows.filter((x) => Math.abs(x.m - 1) > 1e-9).sort((a, b) => Math.abs(b.m - 1) - Math.abs(a.m - 1));
+  const missing = wrong.reduce((t, x) => t + (x.real - x.raw) * (x.r.poolUsd ?? 0), 0);
+
+  const table = (list, cls = "") => `
+    <div class="scroll"><table class="result-table ${cls}"><thead><tr>
+      <th>Token</th>
+      <th class="num">Your wallet shows</th>
+      <th class="num">You actually hold</th>
+      <th class="num">Price</th>
+      <th class="num">Value</th>
+    </tr></thead><tbody>
+    ${list.map((x) => `
+      <tr class="${Math.abs(x.m - 1) > 1e-9 ? "corrected" : ""}">
+        <td class="sym">${x.r.symbol}</td>
+        <td class="num muted">${x.raw.toLocaleString("en-US", { maximumFractionDigits: 4 })}</td>
+        <td class="num">${x.real.toLocaleString("en-US", { maximumFractionDigits: 4 })}</td>
+        <td class="num muted">${x.r.poolUsd == null ? "no price" : fmtPrice(x.r.poolUsd)}</td>
+        <td class="num">${x.usd == null ? "–" : fmtUsd(x.usd)}</td>
+      </tr>`).join("")}
+    </tbody></table></div>`;
+
+  out.innerHTML = `
+    <div class="result">
+      <div class="result-top">
+        <div><b>${fmtUsd(total)}</b><span>across ${rows.length} Stock Token${rows.length === 1 ? "" : "s"}</span></div>
+        ${wrong.length
+          ? `<div class="miss"><b>+${fmtUsd(missing)}</b><span>held but not shown, on ${wrong.length} token${wrong.length === 1 ? "" : "s"}</span></div>`
+          : ""}
+      </div>
+
+      ${wrong.length ? `
+        <h3 class="result-head">What a raw balance gets wrong here</h3>
+        ${table(wrong, "lead")}
+        <p class="note">These carry an ERC-8056 multiplier — a split or a distribution that changed what the
+          balance means without changing the balance. Anything reading <code>balanceOf</code> alone shows the
+          middle column.</p>
+      ` : `<p class="note">Nothing in this wallet carries a multiplier right now, so a raw balance happens to be right.
+        That changes the next time one of these tokens splits or pays out.</p>`}
+
+      ${rows.length > wrong.length ? `
+        <details class="all-holdings">
+          <summary>All ${rows.length} holdings</summary>
+          ${table(rows)}
+        </details>` : ""}
+
+      <p class="note">Valued at the on-chain consensus price, which is what the pools quote — not what a sale
+        would fill at, and not available at all for the ${snap.rows.length - snap.counts.withFeed} tokens with no
+        reference feed.</p>
+    </div>`;
+}
+
+/**
+ * A real wallet that holds every one of the multiplier-adjusted tokens, so a
+ * first visit lands on the case the page is about rather than an empty result.
+ */
+const DEMO_ADDRESS = "0x92d435C96E63c43E12d6D0AB28f6b0B04072F765";
+
+// ---------------------------------------------------------------- tiles
+
+function drawTiles(snap) {
+  const priced = snap.rows.filter((r) => r.quality === "ok");
+  const arbs = snap.rows.filter((r) => r.venueArb && r.venueArb.netBps > 0)
+    .sort((a, b) => b.venueArb.netBps - a.venueArb.netBps);
+  const top = arbs[0];
+  const tvl = snap.rows.reduce((t, r) => t + r.depthUsd, 0);
+  const ages = snap.rows.filter((r) => r.feed).map((r) => r.feed.ageSec).sort((a, b) => a - b);
+  const median = ages.length ? ages[Math.floor(ages.length / 2)] : 0;
+
+  const tiles = [
+    top ? {
+      big: `${top.venueArb.netBps} bps`,
+      label: `widest gap between two live pools, after both fees — ${top.symbol}`,
+      sub: `worth ${fmtUsd(top.venueArb.sizeUsd * top.venueArb.netBps / 10000)} on the ${fmtUsd(top.venueArb.sizeUsd)} it can absorb`,
+      tone: "market",
+    } : {
+      big: "none", label: "gaps between pools that survive both fees", sub: "the venues are arbitraged to inside their own toll", tone: "",
+    },
+    { big: fmtUsd(tvl), label: "sitting in Stock Token pools", sub: `across ${priced.length} tokens with depth behind their price`, tone: "" },
+    { big: fmtSpan(median), label: "since the reference last moved", sub: snap.market.offHours
+        ? `US market is ${snap.market.phase === "weekend" ? "closed for the weekend" : "shut"} — the pools are the only live price`
+        : "the regular session is open, so the reference is tracking", tone: "ref" },
+  ];
+
+  $("#tiles").innerHTML = tiles.map((t) => `
+    <div class="tile">
+      <b class="${t.tone}">${t.big}</b>
+      <span class="tile-label">${t.label}</span>
+      <span class="tile-sub">${t.sub}</span>
+    </div>`).join("");
+}
+
+// ---------------------------------------------------------------- why
+
+function drawSteps(snap) {
+  $("#why-note").textContent =
+    "Two prices exist for the same token and they are kept by different machinery. "
+    + "Chainlink publishes a reference that follows the US market on a 24-hour heartbeat and a 0.5% deviation trigger. "
+    + "Uniswap keeps trading whether or not the market is open. The gap between them is the only genuinely new "
+    + "information a tokenized equity produces.";
+
+  $("#steps").innerHTML = [
+    "Robinhood issues each US stock as an ERC-20 on its own chain. 194 of them exist today.",
+    "35 of those have a Chainlink reference price. It only moves when the underlying moves half a percent, or once a day, whichever comes first.",
+    "All 194 trade on Uniswap around the clock, including while the US market is shut.",
+    "So out of hours the reference is a frozen photograph and the pool is the live price. The difference is the market's guess at the next open.",
+  ].map((t) => `<li>${t}</li>`).join("");
+}
+
+// ---------------------------------------------------------------- the last mile
+
+function arbTable(snap, onPick) {
+  const rows = snap.rows.filter((r) => r.venueArb).sort((a, b) => b.venueArb.netBps - a.venueArb.netBps);
+  const live = rows.filter((r) => r.venueArb.netBps > 0);
+  const gas = snap.gas?.swapUsd ?? null;
+
+  $("#arb-note").textContent =
+    "A premium is measured against a Chainlink feed, and nobody trades at a Chainlink feed — collecting one means "
+    + "betting the pool converges. The spread between two live pools of the same token is different: both legs are "
+    + "on chain, in the same block, and it needs no view on where the stock is going. This is that spread, after "
+    + "both pools' fees.";
+
+  const cols = [
+    { k: "symbol", t: "Token", key: (r) => r.symbol },
+    { k: "net", t: "Net of both fees", key: (r) => r.venueArb.netBps, num: true, desc: true },
+    { k: "gross", t: "Gross spread", key: (r) => r.venueArb.grossBps, num: true, desc: true },
+    { k: "size", t: "Size it absorbs", key: (r) => r.venueArb.sizeUsd, num: true, desc: true },
+    { k: "profit", t: "Which is worth", key: (r) => r.venueArb.sizeUsd * r.venueArb.netBps, num: true, desc: true },
+    { k: "buy", t: "Buy", key: (r) => r.venueArb.buy.priceUsd },
+    { k: "sell", t: "Sell", key: (r) => r.venueArb.sell.priceUsd },
+  ];
+  const render = (r) => {
+    const a = r.venueArb;
+    const profit = (a.sizeUsd * a.netBps) / 10000;
+    const worth = gas != null && profit <= gas * 2;
+    return `<tr data-sym="${r.symbol}" tabindex="0" class="${a.netBps > 0 ? "" : "thin"}">
+      <td class="sym">${r.symbol}</td>
+      <td class="num ${a.netBps > 0 ? "pos" : "muted"}">${fmtBps(a.netBps)}</td>
+      <td class="num muted">${fmtBps(a.grossBps)}</td>
+      <td class="num">${fmtUsd(a.sizeUsd)}</td>
+      <td class="num ${worth ? "muted" : ""}">${profit < 0 ? "–" : "$" + profit.toFixed(2)}${worth ? ` <span class="flag">under gas</span>` : ""}</td>
+      <td class="muted">${a.buy.venue} · ${a.buy.feeBps}bps</td>
+      <td class="muted">${a.sell.venue} · ${a.sell.feeBps}bps</td>
+    </tr>`;
+  };
+  const table = $("#t-arb");
+  sortable(table, cols, rows.slice(0, 14), render, { key: (r) => r.venueArb.netBps, dir: -1, name: "net" });
+  const bind = () => table.tBodies[0].querySelectorAll("tr").forEach((tr) => {
+    const go = () => onPick(tr.dataset.sym);
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  });
+  table.addEventListener("painted", bind);
+  bind();
+
+  const best = live[0];
+  const bestProfit = best ? (best.venueArb.sizeUsd * best.venueArb.netBps) / 10000 : 0;
+  $("#arb-foot").innerHTML =
+    `${live.length} of ${rows.length} pairs survive their own fees right now. `
+    + (best
+      ? `The widest, ${best.symbol}, clears ${best.venueArb.netBps} bps — but only across ${fmtUsd(best.venueArb.sizeUsd)}
+         of size, which is <b>${"$" + bestProfit.toFixed(2)}</b> before ${gas == null ? "gas" : `the ${"$" + gas.toFixed(2)} of gas a swap costs`}
+         and before either pool moves. That is the honest reason these are still open.`
+      : `Nothing is worth crossing, which is what an arbitraged market looks like.`)
+    + ` Size is what the pools can absorb before the two prices meet, capped at their actual reserves.`;
+}
+
 // ---------------------------------------------------------------- true float
+
 
 const CAT = [
   { k: "pool",     label: "AMM pools",          fill: "var(--market)", op: 0.75 },
@@ -450,14 +707,34 @@ async function main() {
   $("#main").innerHTML = "";
   $("#main").append($("#tpl-body").content.cloneNode(true));
 
-  drawVerdict(snap);
+  drawTiles(snap);
+  drawSteps(snap);
   drawDayBar(snap);
-  const onPick = (sym) => drawDetail(snap, series, sym);
+  drawChainline(snap);
+  const onPick = (sym) => {
+    drawDetail(snap, series, sym);
+    $("#detail").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" });
+  };
+  arbTable(snap, onPick);
   drawBand(snap, onPick);
   pricedTable(snap, onPick);
   multiplierTable(snap);
   coverage(snap);
   drawFloat(index.holders ?? []);
+
+  $("#addr-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = $("#addr").value.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(v)) {
+      $("#check-out").innerHTML = `<p class="checking">That is not an address. It should be 0x followed by 40 hex characters.</p>`;
+      return;
+    }
+    runCheck(snap, v);
+  });
+  $("#demo").addEventListener("click", () => {
+    $("#addr").value = DEMO_ADDRESS;
+    runCheck(snap, DEMO_ADDRESS);
+  });
 
   let t;
   addEventListener("resize", () => {

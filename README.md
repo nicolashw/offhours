@@ -50,10 +50,23 @@ the collector already commits: `data/latest.json` for the current state, `data/s
 for history, and `data/index.json` as the manifest, since a static host cannot list a directory.
 Serve the repo root and open `/web/`; the same files work unchanged on GitHub Pages.
 
-The page leads with the thing the project is named for: where the US trading day currently is, how
-long the Chainlink reference has been frozen, and every priced token as one mark on a premium axis
-sized by the money actually in its pools. Tokens priced out of drained pools sit in their own lane
-below the axis rather than at the top of the rankings.
+It is layered, because a wall of basis points asks a reader to already care:
+
+1. **Paste an address.** Ten of these tokens carry a multiplier, so ten of them are reported wrong
+   by every wallet that reads `balanceOf` — a CRWD holder is shown a quarter of their position. The
+   page answers that for one address in one paste, read-only, no wallet connected. Balances travel
+   as a single hand-encoded Multicall3 `eth_call`: the RPC's batch endpoint returns a duplicated
+   CORS header that browsers refuse, so 194 balances have to fit in one request.
+2. **Three numbers** for the state of the chain: the widest gap between two live pools after both
+   fees, the money sitting in Stock Token pools, and how long the reference has been frozen.
+3. **Why a gap exists at all** — the trading day, and the four sentences that explain it.
+4. **What a gap is actually worth.** A premium is measured against a Chainlink feed and nobody
+   trades at a Chainlink feed; the spread between two live pools is the one that can be closed in a
+   single block. Shown net of both pools' fees, with the size each can absorb, and flagged when the
+   profit is smaller than gas. Right now the widest is worth $19, which is the honest reason it is
+   still open.
+5. **The full measurement** below a divider: the premium band, the reference table, the multiplier
+   list, holder composition, and coverage.
 
 ### The agent-facing layer
 

@@ -159,6 +159,49 @@ export type Row = {
   premiumBps: number | null;
   /** premiumBps, but only when the market is shut and the reference is frozen. */
   impliedMoveBps: number | null;
+  /**
+   * What is left of the gap once it is paid for.
+   *
+   * The gross premium is the number everyone quotes and the number nobody can
+   * act on: crossing an AMM costs the pool's fee, and these pools run anywhere
+   * from 5 bps to 100 bps. A 34 bps gap through a 100 bps pool is not an
+   * opportunity, it is a loss, and a page that prints the gross number invites
+   * a reader to find that out with their own money.
+   */
+  cost: {
+    /** TVL-weighted fee of the pools that set the price, in bps. */
+    poolFeeBps: number | null;
+    /** |premium| - poolFeeBps. Negative means the gap is smaller than the toll. */
+    netGapBps: number | null;
+    /**
+     * Quote-side size that would push the pools back to the reference, in USD.
+     *
+     * dY = L*(sqrt(P') - sqrt(P)) = depthScore * (sqrt(P'/P) - 1) — exact while
+     * the move stays inside the current liquidity range, and capped at the
+     * pool's actual reserves so a razor-thin range cannot claim more depth than
+     * it holds. An upper bound on how much the gap is worth, not a promise.
+     */
+    sizeToCloseUsd: number | null;
+    /** Some pools ask their hook for the fee per swap; those are excluded from poolFeeBps. */
+    dynamicFeePools: number;
+  };
+  /**
+   * The gap you could actually close, as opposed to the one against the reference.
+   *
+   * A premium is measured against a Chainlink feed, and no one trades at a
+   * Chainlink feed — realising it means betting the pool converges. The spread
+   * between two live pools of the same token is different: both legs are on
+   * chain, in the same block, and the trade needs no view on where the
+   * underlying is. So this looks for the cheapest and dearest pool a token
+   * trades in and reports what survives both pools' fees.
+   */
+  venueArb: {
+    netBps: number;
+    grossBps: number;
+    sizeUsd: number;
+    buy: { venue: string; id: string; quote: string; feeBps: number; priceUsd: number };
+    sell: { venue: string; id: string; quote: string; feeBps: number; priceUsd: number };
+  } | null;
   note?: string;
 };
 
@@ -167,6 +210,8 @@ export type Snapshot = {
   market: { phase: Phase; etTime: string; offHours: boolean };
   registryFetchedAt: string; poolsDiscoveredAt: string;
   quotes: Record<string, { address: Address; usd: number | null; decimals: number; feedAgeSec: number | null }>;
+  /** What one swap costs in gas right now, so the net gap can be quoted per trade size. */
+  gas: { priceWei: string; swapUsd: number | null };
   counts: { assets: number; withFeed: number; withPool: number; priced: number; trustworthy: number; beyondHeartbeat: number };
   rows: Row[];
 };
@@ -190,6 +235,61 @@ function quoteDepth(sqrtPriceX96: bigint, liquidity: bigint, quoteIsToken0: bool
   const raw = quoteIsToken0 ? L / sqrtP : L * sqrtP;
   const v = raw / 10 ** quoteDec;
   return isFinite(v) ? v : null;
+}
+
+/** Below this a pool cannot absorb a trade worth doing; ignore it when pairing venues. */
+const MIN_LEG_TVL_USD = 2_000;
+
+/**
+ * Cheapest and dearest live pool for one token, net of both fees.
+ *
+ * Pools whose fee is set by a hook per swap are excluded: their cost is not
+ * knowable ahead of the trade, so quoting a net number for them would be a
+ * guess dressed as a measurement.
+ */
+function venueArbOf(core: PoolRead[]): Row["venueArb"] {
+  const legs = core.filter((p) => !p.dynamicFee && p.priceUsd != null && (p.tvlUsd ?? 0) >= MIN_LEG_TVL_USD);
+  if (legs.length < 2) return null;
+
+  let best: Row["venueArb"] = null;
+  for (const lo of legs) for (const hi of legs) {
+    if (lo === hi || hi.priceUsd! <= lo.priceUsd!) continue;
+    const grossBps = (hi.priceUsd! / lo.priceUsd! - 1) * 10_000;
+    const netBps = grossBps - lo.fee / 100 - hi.fee / 100;
+    if (best && netBps <= best.netBps) continue;
+    // Size that takes both pools to the midpoint; the smaller leg binds.
+    const mid = Math.sqrt(lo.priceUsd! * hi.priceUsd!);
+    const legSize = (p: PoolRead) =>
+      Math.min(Math.abs(Math.sqrt(mid / p.priceUsd!) - 1) * (p.depthScore ?? 0), p.tvlUsd ?? 0);
+    best = {
+      netBps: Math.round(netBps), grossBps: Math.round(grossBps),
+      sizeUsd: Math.min(legSize(lo), legSize(hi)),
+      buy: { venue: lo.venue, id: lo.id, quote: lo.quote, feeBps: lo.fee / 100, priceUsd: lo.priceUsd! },
+      sell: { venue: hi.venue, id: hi.id, quote: hi.quote, feeBps: hi.fee / 100, priceUsd: hi.priceUsd! },
+    };
+  }
+  return best && best.netBps > -10_000 ? best : null;
+}
+
+/** The toll on the gap, and how much size the gap is actually worth. */
+function costOf(
+  core: PoolRead[], premiumBps: number | null, poolUsd: number | null, feedUsd: number | null,
+): Row["cost"] {
+  const dynamicFeePools = core.filter((p) => p.dynamicFee).length;
+  const fixed = core.filter((p) => !p.dynamicFee && (p.tvlUsd ?? 0) > 0);
+  const w = fixed.reduce((t, p) => t + p.tvlUsd!, 0);
+  const poolFeeBps = w > 0 ? Math.round(fixed.reduce((t, p) => t + (p.fee / 100) * p.tvlUsd!, 0) / w) : null;
+  const netGapBps = premiumBps != null && poolFeeBps != null ? Math.abs(premiumBps) - poolFeeBps : null;
+
+  let sizeToCloseUsd: number | null = null;
+  if (poolUsd != null && feedUsd != null && poolUsd > 0 && feedUsd > 0) {
+    sizeToCloseUsd = core.reduce((t, p) => {
+      if (!p.priceUsd || !p.depthScore) return t;
+      const move = Math.abs(Math.sqrt(feedUsd / p.priceUsd) - 1) * p.depthScore;
+      return t + Math.min(move, p.tvlUsd ?? move);
+    }, 0);
+  }
+  return { poolFeeBps, netGapBps, sizeToCloseUsd, dynamicFeePools };
 }
 
 function priceFromSqrt(sqrtPriceX96: bigint, token0: Address, token: Address, tokenDec: number, quoteDec: number): number {
@@ -224,7 +324,10 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
   const pools: Pools = loadPools();
   const v4Pools = activeV4(pools);
   const now = Math.floor(Date.now() / 1000);
-  const block = await withRetry(() => client.getBlockNumber(), "blockNumber");
+  const [block, gasPriceWei] = await Promise.all([
+    withRetry(() => client.getBlockNumber(), "blockNumber"),
+    withRetry(() => client.getGasPrice(), "gasPrice").catch(() => 0n),
+  ]);
 
   // ---- quote assets: decimals + their own Chainlink USD price ----
   const qCalls = cfg.quoteTokens.flatMap((q) => [
@@ -447,13 +550,23 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
       best: best ? { venue: best.venue, id: best.id, quote: best.quote, priceUsd: best.priceUsd!, tvlUsd: best.tvlUsd } : null,
       poolUsd, dispersionBps, livePools: core.length, depthUsd, quality, premiumBps,
       impliedMoveBps: phase.offHours && quality === "ok" ? premiumBps : null,
+      cost: costOf(core, premiumBps, poolUsd, feed?.price ?? null),
+      venueArb: venueArbOf(core),
       note: !feed ? "no Chainlink reference — the AMM is the only price" : undefined,
     };
   });
 
+  // A single-hop swap on a Uniswap router lands around here; it is the order of
+  // magnitude that matters, since gas on this chain is subsidised to near zero
+  // until the end of September and will stop being negligible after that.
+  const SWAP_GAS = 180_000n;
+  const ethUsd = quotes.WETH?.usd ?? null;
+  const swapUsd = ethUsd == null ? null : (Number(gasPriceWei * SWAP_GAS) / 1e18) * ethUsd;
+
   return {
     ts: new Date().toISOString(), chainId: cfg.chainId, block: block.toString(),
     market: phase,
+    gas: { priceWei: gasPriceWei.toString(), swapUsd },
     registryFetchedAt: reg.fetchedAt, poolsDiscoveredAt: pools.discoveredAt,
     quotes,
     counts: {

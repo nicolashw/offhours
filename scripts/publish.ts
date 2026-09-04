@@ -17,7 +17,8 @@ import type { Snapshot } from "./collect.js";
 export type SeriesPoint = {
   ts: string; block: string; phase: string; offHours: boolean;
   rows: Array<[symbol: string, premiumBps: number | null, poolUsd: number | null,
-                feedUsd: number | null, feedAgeSec: number | null, tvlUsd: number, quality: string]>;
+                feedUsd: number | null, feedAgeSec: number | null, tvlUsd: number, quality: string,
+                netGapBps: number | null]>;
 };
 
 /**
@@ -47,6 +48,7 @@ export function toSeriesPoint(s: Snapshot): SeriesPoint {
       .map((r) => [
         r.symbol, r.premiumBps, r.poolUsd == null ? null : Number(r.poolUsd.toFixed(6)),
         r.feed?.price ?? null, r.feed?.ageSec ?? null, Math.round(r.depthUsd), r.quality,
+        r.cost?.netGapBps ?? null,
       ]),
   };
 }
