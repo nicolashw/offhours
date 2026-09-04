@@ -32,6 +32,8 @@ npm run verify               # premium / discount / staleness / multiplier table
 npm run snapshot             # append one line to data/YYYY-MM-DD.ndjson
 npm run holders -- --symbol USO   # true float, rebuilt from Transfer logs
 npm run mcp                  # MCP server over stdio, for agents
+
+python3 -m http.server 8765  # then open http://localhost:8765/web/
 ```
 
 `verify` takes `--all` for the full universe, `--symbol AAPL,NVDA` for pool-level detail,
@@ -40,6 +42,18 @@ and is resumable — the V4 crawl writes after every token. It finishes with a s
 marks which V4 pools actually hold liquidity; 2,486 of 6,612 do, and skipping the rest is what
 keeps a full pass at ~25s instead of ~65s. Re-run it periodically, since new pools open
 constantly.
+
+### The dashboard
+
+`web/` is a static page — no framework, no build step, no server of its own. It reads three files
+the collector already commits: `data/latest.json` for the current state, `data/series/<day>.ndjson`
+for history, and `data/index.json` as the manifest, since a static host cannot list a directory.
+Serve the repo root and open `/web/`; the same files work unchanged on GitHub Pages.
+
+The page leads with the thing the project is named for: where the US trading day currently is, how
+long the Chainlink reference has been frozen, and every priced token as one mark on a premium axis
+sized by the money actually in its pools. Tokens priced out of drained pools sit in their own lane
+below the axis rather than at the top of the rankings.
 
 ### The agent-facing layer
 
@@ -77,6 +91,8 @@ block and market session it came from. There is no tool that can move an asset.
 | `scripts/rpc.ts` | Multicall3 batching, backoff, log-range bisection |
 | `scripts/market.ts` | which US session a timestamp falls in |
 | `scripts/mcp.ts` | the same collector, exposed to agents over MCP |
+| `scripts/publish.ts` | trims each snapshot into the static files the dashboard reads |
+| `web/` | the dashboard: three files, no build |
 
 Discovery caches (`config/registry.json`, `config/pools.json`) are committed on purpose:
 CI and the dashboard stay deterministic, both keep working when an upstream is down, and the

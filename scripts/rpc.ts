@@ -188,7 +188,7 @@ export async function getLogsAdaptive(
     } catch (e) {
       const msg = errText(e);
       const splittable = /exceeds limit|timed out|timeout|unknown RPC|response size|too large|missing or invalid/i.test(msg);
-      if (!splittable || hi - lo < 2_000n || depth > 14) throw e;
+      if (!splittable || hi - lo < 16n || depth > 24) throw e;
       const mid = lo + (hi - lo) / 2n;
       return [...(await fetchRange(lo, mid, depth + 1)), ...(await fetchRange(mid + 1n, hi, depth + 1))];
     }

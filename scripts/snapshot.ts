@@ -5,11 +5,13 @@
  */
 import { collect, loadCfg } from "./collect.js";
 import { appendFileSync, mkdirSync } from "node:fs";
+import { publish } from "./publish.js";
 
 const snap = await collect(loadCfg());
 mkdirSync("data", { recursive: true });
 const file = `data/${snap.ts.slice(0, 10)}.ndjson`;
 appendFileSync(file, JSON.stringify(snap) + "\n");
+publish(snap);
 
 const c = snap.counts;
 console.log(

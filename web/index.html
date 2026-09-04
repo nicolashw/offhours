@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OffHours — Robinhood Stock Tokens on chain</title>
+<meta name="description" content="What tokenized US equities are worth on chain while the market is shut: pool consensus against a frozen Chainlink reference, the depth behind it, and the multiplier that makes balanceOf lie.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="wrap">
+  <header class="masthead">
+    <div class="wordmark">Off<span>Hours</span></div>
+    <div class="chainline" id="chainline">reading the chain…</div>
+  </header>
+
+  <div class="hero">
+    <p class="verdict" id="verdict">&nbsp;</p>
+    <p class="verdict-sub" id="verdict-sub"></p>
+    <svg class="daybar" id="daybar" role="img" aria-label="US trading day, with the current moment marked"></svg>
+  </div>
+</div>
+
+<main class="wrap" id="main">
+  <p class="loading" id="loading">Loading the latest snapshot…</p>
+</main>
+
+<template id="tpl-body">
+  <section>
+    <div class="panel-head"><h2>Where every priced token is trading against its reference</h2></div>
+    <p class="note" id="band-note"></p>
+    <svg id="band" role="img" aria-label="Premium and discount of each token against its Chainlink reference, in basis points"></svg>
+  </section>
+
+  <section>
+    <div class="panel-head"><h2>Tokens with a Chainlink reference</h2></div>
+    <p class="note">The amber bar is how far the reference has drifted through its own 24-hour heartbeat. Out of hours it is frozen at the last regular-session print, so premium reads as the market's implied move into the next open. Pick a row for pool-level detail.</p>
+    <div class="scroll"><table id="t-priced"><thead></thead><tbody></tbody></table></div>
+    <div id="detail"></div>
+  </section>
+
+  <section>
+    <div class="panel-head"><h2>Where balanceOf lies</h2></div>
+    <p class="note">Stock Tokens carry an ERC-8056 <code>uiMultiplier()</code> that absorbs splits and distributions without moving <code>balanceOf</code>. A wallet reading the raw value for these tokens is showing the wrong position.</p>
+    <div class="scroll"><table id="t-mult"><thead></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="float-section" hidden>
+    <div class="panel-head"><h2>Who actually holds these</h2></div>
+    <p class="note">Holder lists count AMM pools and protocol escrow as holders. Splitting them out leaves the
+      true float — the part in wallets that can actually change hands. Rebuilt from the token's own Transfer
+      history; run <code>npm run holders -- --symbol X --save</code> to add a token.</p>
+    <div id="float"></div>
+  </section>
+
+  <section>
+    <div class="panel-head"><h2>What is actually covered</h2></div>
+    <p class="note">Most Stock Tokens have no on-chain reference price at all. For those the AMM is not commentary on a price — it is the only price there is, and no protocol can value them as collateral today.</p>
+    <div class="coverage" id="coverage"></div>
+  </section>
+</template>
+
+<footer class="wrap">
+  Read-only. Prices come from Uniswap V3 and V4 pools on Robinhood Chain and from Chainlink reference feeds;
+  nothing here is a quote, an offer, or investment advice.
+  <a href="https://github.com/nicolashw/offhours">Source and findings log</a>.
+</footer>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>

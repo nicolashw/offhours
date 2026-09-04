@@ -1,0 +1,164 @@
+/* OffHours — read as a night instrument: cool ground, two data-bearing accents.
+   Cyan is the live market side, amber the frozen reference side; nothing is
+   coloured for decoration. */
+
+:root {
+  --ground: #0b141c;
+  --panel:  #101d28;
+  --rule:   #1e3040;
+  --rule-soft: #16232f;
+  --text:   #cbd9e4;
+  --dim:    #6d869c;
+  --dimmer: #4a5f74;
+  --market: #57c9ea;   /* live AMM price */
+  --ref:    #e9a33c;   /* Chainlink reference, frozen out of hours */
+  --alarm:  #e2574c;
+
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html { color-scheme: dark; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font: 400 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 24px; flex-wrap: wrap;
+  padding: 26px 0 20px;
+  border-bottom: 1px solid var(--rule);
+}
+.wordmark { font: 600 25px/1 var(--cond); letter-spacing: -0.01em; }
+.wordmark span { color: var(--market); }
+.chainline { font: 400 13px/1.4 var(--mono); color: var(--dim); font-variant-numeric: tabular-nums; }
+.chainline b { color: var(--text); font-weight: 400; }
+
+/* ---------- hero: the trading day, and where we are in it ---------- */
+
+.hero { padding: 40px 0 34px; }
+
+.verdict {
+  font: 500 clamp(26px, 3.4vw, 40px)/1.18 var(--cond);
+  letter-spacing: -0.015em;
+  max-width: 22ch;
+  margin: 0 0 10px;
+}
+.verdict .live, .verdict .frozen { white-space: nowrap; }
+.verdict .live { color: var(--market); }
+.verdict .frozen { color: var(--ref); }
+
+.verdict-sub { color: var(--dim); max-width: 62ch; margin: 0 0 30px; }
+
+.daybar { width: 100%; height: 66px; display: block; }
+.daybar text { font: 400 11px var(--mono); fill: var(--dimmer); }
+.daybar .seg-label { font: 500 12px var(--cond); }
+.daybar .now-label { fill: var(--text); font-weight: 500; }
+
+/* ---------- panels ---------- */
+
+section { padding: 34px 0; border-top: 1px solid var(--rule-soft); }
+
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+h2 { font: 500 19px/1.2 var(--cond); margin: 0 0 4px; letter-spacing: -0.005em; }
+.note { color: var(--dim); font-size: 13.5px; margin: 0 0 20px; max-width: 74ch; }
+
+/* ---------- the premium band ---------- */
+
+#band { width: 100%; height: 208px; display: block; }
+#band .axis { stroke: var(--rule); }
+#band .zero { stroke: var(--dimmer); }
+#band text { font: 400 11px var(--mono); fill: var(--dimmer); }
+#band .tick-label { font: 500 11px var(--cond); fill: var(--dim); }
+#band circle { cursor: pointer; }
+#band circle:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+
+/* ---------- tables ---------- */
+
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th, td { padding: 7px 12px 7px 0; text-align: left; white-space: nowrap; }
+thead th {
+  font: 500 12px/1.3 var(--cond); color: var(--dim);
+  border-bottom: 1px solid var(--rule); cursor: pointer; user-select: none;
+}
+thead th:hover, thead th:focus-visible { color: var(--text); }
+thead th[data-dir]::after { content: attr(data-dir); color: var(--market); margin-left: 5px; }
+tbody tr { border-bottom: 1px solid var(--rule-soft); }
+tbody tr:hover { background: var(--panel); }
+tbody tr.selected { background: var(--panel); box-shadow: inset 2px 0 0 var(--market); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.sym { font-weight: 500; }
+.name { color: var(--dim); font-size: 12.5px; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; }
+.pos { color: var(--market); }
+.neg { color: var(--ref); }
+.muted { color: var(--dimmer); }
+/* A premium computed on an empty pool is not a headline: keep the row readable, drop its weight. */
+tbody tr.thin td { color: var(--dimmer); }
+tbody tr.thin .pos, tbody tr.thin .neg { color: var(--dimmer); }
+
+/* age bar: the reference dimming as it drifts away from its own heartbeat */
+.agebar { display: inline-block; width: 68px; height: 6px; background: var(--rule); vertical-align: middle; }
+.agebar i { display: block; height: 100%; background: var(--ref); }
+.agebar.past i { background: var(--alarm); }
+
+.flag { font: 500 11px var(--cond); padding: 1px 6px; border: 1px solid var(--rule); color: var(--dim); }
+.flag.warn { color: var(--alarm); border-color: var(--alarm); }
+.flag.big { color: var(--ref); border-color: var(--ref); }
+
+/* ---------- coverage ---------- */
+
+.coverage { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 26px; }
+.cov b { display: block; font: 500 34px/1 var(--cond); font-variant-numeric: tabular-nums; }
+.cov span { color: var(--dim); font-size: 13px; }
+.cov.no-feed b { color: var(--ref); }
+
+/* ---------- detail ---------- */
+
+#detail:empty { display: none; }
+#detail { border-top: 1px solid var(--rule); margin-top: 26px; padding-top: 22px; }
+#detail h3 { font: 500 17px var(--cond); margin: 0 0 2px; }
+#detail .meta { color: var(--dim); font-size: 13px; margin: 0 0 18px; }
+#spark { width: 100%; max-width: 620px; height: 92px; display: block; margin-bottom: 22px; }
+#spark path { fill: none; stroke: var(--market); stroke-width: 1.5; }
+#spark .zero { stroke: var(--dimmer); stroke-dasharray: 2 3; }
+#spark text { font: 400 10px var(--mono); fill: var(--dimmer); }
+
+footer { border-top: 1px solid var(--rule); padding: 22px 0 60px; color: var(--dimmer); font-size: 12.5px; }
+footer a { color: var(--dim); }
+
+.loading { padding: 70px 0; color: var(--dim); }
+
+@media (prefers-reduced-motion: no-preference) {
+  #band circle { transition: r 120ms ease; }
+}
+@media (max-width: 620px) {
+  .wrap { padding: 0 18px; }
+  .name { display: none; }
+}
+
+/* ---------- true float ---------- */
+
+.float-card + .float-card { margin-top: 30px; }
+.float-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.float-head h3 { font: 500 17px var(--cond); margin: 0; }
+.float-head .meta { color: var(--dim); font-size: 12.5px; margin: 0; font-family: var(--mono); }
+.stack { position: relative; height: 22px; margin: 14px 0 12px; background: var(--rule-soft); }
+.stack .seg { position: absolute; top: 0; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 20px; list-style: none; margin: 0 0 10px; padding: 0; font-size: 13px; color: var(--dim); }
+.legend i { display: inline-block; width: 9px; height: 9px; margin-right: 7px; }
+.legend b { color: var(--text); font-weight: 500; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.float-verdict { color: var(--dim); font-size: 13.5px; max-width: 76ch; margin: 0; }
+.float-verdict b { color: var(--text); font-weight: 500; font-family: var(--mono); }
