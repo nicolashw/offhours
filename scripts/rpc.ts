@@ -7,7 +7,7 @@
  * expensive discovery work in committed caches rather than in the hot path.
  */
 
-import { createPublicClient, http, type Address, type PublicClient } from "viem";
+import { createPublicClient, http, type Address, type Hex, type PublicClient } from "viem";
 import { readFileSync, existsSync } from "node:fs";
 
 export type QuoteCfg = { symbol: string; address: Address; usd: boolean; feed?: Address };
@@ -49,18 +49,37 @@ export function makeClient(cfg: Cfg): PublicClient {
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Flatten an error and everything it wraps into one searchable string.
+ * viem buries the node's actual message under `details`/`cause`, and a 429 that
+ * arrives with a non-JSON body surfaces as a generic parameter complaint — so
+ * matching on `.message` alone misclassifies rate limiting as a real failure.
+ */
+export function errText(e: unknown): string {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  let cur: any = e;
+  while (cur && !seen.has(cur) && parts.length < 8) {
+    seen.add(cur);
+    for (const k of ["shortMessage", "details", "message"]) if (typeof cur[k] === "string") parts.push(cur[k]);
+    cur = cur.cause;
+  }
+  return parts.join(" | ");
+}
+
+const RETRYABLE = /429|too many requests|rate limit|timed out|timeout|fetch failed|ECONN|socket|missing or invalid parameters|internal error/i;
+
 /** Retry with exponential backoff. The public RPC answers 429 under any real load. */
 export async function withRetry<T>(fn: () => Promise<T>, label: string, tries = 5): Promise<T> {
-  let wait = 800;
+  let wait = 1_000;
   for (let i = 0; ; i++) {
     try {
       return await fn();
     } catch (e) {
-      const msg = (e as Error).message ?? "";
-      const retryable = /429|Too Many Requests|timed out|timeout|fetch failed|ECONN|socket/i.test(msg);
-      if (i >= tries - 1 || !retryable) throw new Error(`${label}: ${msg.slice(0, 200)}`);
+      const msg = errText(e);
+      if (i >= tries - 1 || !RETRYABLE.test(msg)) throw new Error(`${label}: ${msg.slice(0, 220)}`);
       await sleep(wait);
-      wait = Math.min(wait * 2, 15_000);
+      wait = Math.min(wait * 2, 20_000);
     }
   }
 }
@@ -113,4 +132,43 @@ export async function multicall(
   const out: CallResult[] = [];
   for (let i = 0; i < calls.length; i += chunk) out.push(...(await run(calls.slice(i, i + chunk))));
   return out;
+}
+
+/**
+ * eth_getLogs over an arbitrary range, bisecting on failure.
+ *
+ * The public RPC refuses a wide query two ways — `exceeds limit of 10000` and
+ * `log query timed out` — and both mean the same thing: ask for less. Splitting
+ * on the error instead of using a fixed block step keeps a quiet contract at one
+ * round-trip and only pays the split cost where the chain is actually busy.
+ */
+export async function getLogsAdaptive(
+  client: PublicClient,
+  filter: { address: Address; topics: (Hex | Hex[] | null)[] },
+  from: bigint, to: bigint,
+  onProgress?: (from: bigint, to: bigint, n: number) => void,
+  depth = 0,
+): Promise<any[]> {
+  const hex = (n: bigint) => `0x${n.toString(16)}` as Hex;
+  try {
+    const logs = (await withRetry(
+      () => client.request({
+        method: "eth_getLogs",
+        params: [{ fromBlock: hex(from), toBlock: hex(to), address: filter.address, topics: filter.topics }],
+      } as any),
+      "getLogs", 3,
+    )) as any[];
+    onProgress?.(from, to, logs.length);
+    return logs;
+  } catch (e) {
+    const msg = (e as Error).message;
+    const splittable = /exceeds limit|timed out|timeout|unknown RPC|response size|too large/i.test(msg);
+    if (!splittable || to - from < 5_000n || depth > 26) throw e;
+    const mid = from + (to - from) / 2n;
+    await sleep(150);
+    const lo = await getLogsAdaptive(client, filter, from, mid, onProgress, depth + 1);
+    await sleep(150);
+    const hi = await getLogsAdaptive(client, filter, mid + 1n, to, onProgress, depth + 1);
+    return [...lo, ...hi];
+  }
 }

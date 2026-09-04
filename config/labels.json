@@ -1,0 +1,22 @@
+{
+  "_comment": "Address overlay for holder analysis. Classification works without it — code/no-code and pool membership are derivable on-chain — but names make the output readable. Add entries as they are identified; never guess.",
+  "addresses": {
+    "0x39b38686A19836Ac10162c490E4558e120CbBE5f": { "label": "RobinHoodSettler", "category": "protocol" },
+    "0x8366a39CC670B4001A1121B8F6A443A643e40951": { "label": "UniswapV4 PoolManager", "category": "pool" },
+    "0xCaf681a66D020601342297493863E78C959E5cb2": { "label": "SwapRouter02", "category": "router" },
+    "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA": { "label": "UniswapV3 Factory", "category": "protocol" },
+    "0xcA11bde05977b3631167028862bE2a173976CA11": { "label": "Multicall3", "category": "router" },
+    "0xD6d9E6e40DEc4BBAE488Fe18c976A62343c8E7Cb": { "label": "Bucket: Core", "category": "protocol" },
+    "0x6B0bFF8FeC9A047bE9691000959d819DE3E31550": { "label": "BeaconProxy (distributor)", "category": "protocol" },
+    "0x02175608F1b5E6b5ed221cCFdC7Be197D111D915": { "label": "UniswapV3Pool (USO)", "category": "pool" },
+    "0x98A27Fc90c643562f9793089acf2697aB4c0a880": { "label": "CLPool (USO)", "category": "pool" }
+  },
+  "_nameRules": "Applied to any label supplied above or discovered later; first match wins.",
+  "nameRules": [
+    { "match": "escrow",       "category": "escrow" },
+    { "match": "pool|pair|amm", "category": "pool" },
+    { "match": "router|settler|multicall", "category": "router" },
+    { "match": "treasury|dividend|distributor|vault|nav|fee|core|reserve", "category": "protocol" },
+    { "match": "safe",         "category": "protocol" }
+  ]
+}

@@ -28,6 +28,13 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
 
+      - name: Refresh registry
+        # Cheap, and the point of committing it: the diff on config/registry.json is the
+        # audit trail for new listings and for ERC-8056 multiplier changes (splits,
+        # distributions) as they land. Never fail the snapshot over an upstream hiccup.
+        continue-on-error: true
+        run: npm run registry
+
       - name: Collect
         env:
           # Optional: set a private RPC in repo Settings -> Secrets -> Actions as RPC_URL.
@@ -40,7 +47,7 @@ jobs:
           set -euo pipefail
           git config user.name  "offhours-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add data/ config/registry.json
           if git diff --staged --quiet; then
             echo "no new data"; exit 0
           fi

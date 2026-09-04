@@ -18,7 +18,7 @@
 
 import { getAddress, encodeFunctionData, decodeAbiParameters, type Address, type Hex } from "viem";
 import { writeFileSync } from "node:fs";
-import { loadCfg, makeClient, multicall, withRetry, sleep, type Cfg } from "./rpc.js";
+import { loadCfg, makeClient, multicall, withRetry, sleep, getLogsAdaptive, type Cfg } from "./rpc.js";
 import { loadRegistry } from "./registry.js";
 import { isDynamicFee } from "./v4.js";
 import { loadPools, POOLS_PATH, type Pools, type V3Pool, type V4Pool } from "./pools.js";
@@ -57,46 +57,14 @@ async function discoverV3(cfg: Cfg, assets: { symbol: string; token: Address }[]
   return out;
 }
 
-/**
- * Full-range Initialize logs for one token, as currency0 and as currency1.
- *
- * The public RPC fails a wide query two ways — `exceeds limit of 10000` and
- * `log query timed out` — and both mean the same thing: ask for less. So the
- * range bisects on failure instead of using a fixed block step, which keeps the
- * quiet tokens at one round-trip and only pays the split cost where the chain
- * is actually busy.
- */
-async function getLogsAdaptive(
-  cfg: Cfg, topics: (Hex | null)[], from: bigint, to: bigint, depth = 0,
-): Promise<any[]> {
-  const client = makeClient(cfg);
-  const hex = (n: bigint) => `0x${n.toString(16)}` as Hex;
-  try {
-    return (await withRetry(
-      () => client.request({
-        method: "eth_getLogs",
-        params: [{ fromBlock: hex(from), toBlock: hex(to), address: cfg.v4PoolManager, topics }],
-      } as any),
-      `getLogs`, 3,
-    )) as any[];
-  } catch (e) {
-    const msg = (e as Error).message;
-    const splittable = /exceeds limit|timed out|timeout|unknown RPC|response size/i.test(msg);
-    if (!splittable || to - from < 5_000n || depth > 24) throw e;
-    const mid = from + (to - from) / 2n;
-    await sleep(200);
-    const lo = await getLogsAdaptive(cfg, topics, from, mid, depth + 1);
-    await sleep(200);
-    const hi = await getLogsAdaptive(cfg, topics, mid + 1n, to, depth + 1);
-    return [...lo, ...hi];
-  }
-}
-
+/** Initialize logs for one token, as currency0 and as currency1, over the full chain. */
 async function v4LogsFor(cfg: Cfg, token: Address, from: bigint, to: bigint): Promise<any[]> {
+  const client = makeClient(cfg);
   const pad = (a: Address) => `0x${a.slice(2).toLowerCase().padStart(64, "0")}` as Hex;
-  const asC0 = await getLogsAdaptive(cfg, [INITIALIZE_TOPIC, null, pad(token)], from, to);
+  const f = { address: cfg.v4PoolManager };
+  const asC0 = await getLogsAdaptive(client, { ...f, topics: [INITIALIZE_TOPIC, null, pad(token)] }, from, to);
   await sleep(200);
-  const asC1 = await getLogsAdaptive(cfg, [INITIALIZE_TOPIC, null, null, pad(token)], from, to);
+  const asC1 = await getLogsAdaptive(client, { ...f, topics: [INITIALIZE_TOPIC, null, null, pad(token)] }, from, to);
   return [...asC0, ...asC1];
 }
 

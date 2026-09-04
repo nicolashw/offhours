@@ -8,7 +8,8 @@
     "verify": "tsx scripts/verify.ts",
     "snapshot": "tsx scripts/snapshot.ts",
     "registry": "tsx scripts/registry-refresh.ts",
-    "discover": "tsx scripts/discover.ts"
+    "discover": "tsx scripts/discover.ts",
+    "holders": "tsx scripts/holders.ts"
   },
   "dependencies": {
     "viem": "^2.21.0"

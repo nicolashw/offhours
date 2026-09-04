@@ -20,23 +20,62 @@ Solo builder, three weeks, from a jurisdiction where anything touching execution
 
 ## Status
 
-`D1` — verifying the core signal is computable. See `scripts/verify.ts`.
+Collection covers the full universe: 194 Stock Tokens, both Uniswap venues, hourly snapshots.
 
 ```bash
-cp .env.example .env    # set RPC_URL, SWAP_ROUTER02, QUOTE_TOKENS
 npm i
-npm run verify          # table: feed price, feed age, uiMultiplier, pool price, premium bps
-npm run snapshot        # JSON to data/ — start collecting from day one
+cp .env.example .env         # only RPC_URL; every address lives in config/chain.json
+
+npm run registry             # token universe + Chainlink feeds -> config/registry.json
+npm run discover             # pool discovery (V3 grid + V4 Initialize scan) -> config/pools.json
+npm run verify               # premium / discount / staleness / multiplier table
+npm run snapshot             # append one line to data/YYYY-MM-DD.ndjson
+npm run holders -- --symbol USO   # true float, rebuilt from Transfer logs
 ```
 
-## Key facts established so far (from official docs)
+`verify` takes `--all` for the full universe, `--symbol AAPL,NVDA` for pool-level detail,
+and `--json` for the raw snapshot. `discover` takes `--v3` / `--v4` / `--force` / `--symbol`
+and is resumable — the V4 crawl writes after every token.
 
-- Every Stock Token has a per-asset Chainlink feed using standard `AggregatorV3Interface.latestRoundData()`.
+### How it is put together
+
+| file | role |
+|---|---|
+| `scripts/registry.ts` | merges `/rhj/assets` with Chainlink's reference-data directory |
+| `scripts/discover.ts` | caches pool discovery — the slow part, kept out of the hourly path |
+| `scripts/v4.ts` | Uniswap V4 reads: `poolId` -> storage slot -> `extsload` |
+| `scripts/collect.ts` | one batched pass: feeds, multipliers, pool prices, premium |
+| `scripts/holders.ts` | true float from Transfer logs, no explorer required |
+| `scripts/rpc.ts` | Multicall3 batching, backoff, log-range bisection |
+| `scripts/market.ts` | which US session a timestamp falls in |
+
+Discovery caches (`config/registry.json`, `config/pools.json`) are committed on purpose:
+CI and the dashboard stay deterministic, both keep working when an upstream is down, and the
+diff on `registry.json` is the audit trail for new listings and multiplier changes.
+
+## What the data says so far
+
+Established by running it, not by reading docs — the full log is in [docs/FINDINGS.md](docs/FINDINGS.md).
+
+- **194 Stock Tokens exist; only 35 have a Chainlink feed.** For the other 82% the AMM is the
+  only on-chain price there is.
+- **The equity feeds are 24h-heartbeat / 0.5%-deviation.** A reference that has not moved for
+  eleven hours is in spec, not broken — so age is reported against its own heartbeat, and
+  premium is always tagged with the market session it was measured in.
+- **CRWD's `uiMultiplier()` is 4.0.** Anything reading `balanceOf` alone shows a holder one
+  quarter of their real position. Ten tokens are off 1.0 today.
+- **A drained pool still quotes a price.** Six tokens showed 10–19% "premiums" out of pools with
+  zero liquidity. Every price is now qualified by the depth backing it.
+- **No sequencer uptime feed exists on this chain**, so there is no on-chain way to know whether
+  the sequencer was down when a price was written. Observed feed age is the only proxy.
+
+## Key facts established so far
+
+- Every Stock Token with a feed uses standard `AggregatorV3Interface.latestRoundData()`.
 - The feed price is **Total Return Value** = underlying market price × `uiMultiplier()`. Do not apply the multiplier again.
-- Feeds are **24/5** (regular, pre, post, overnight sessions). During weekends/holidays they hold the last price with no heartbeat.
-- Robinhood's REST `/prices` returns raw underlying bid/ask (not multiplier-adjusted); `/assets` returns `currentMultiplier`. Mixing surfaces requires converting.
-- Trading is RFQ at launch (0x RFQ, 1inch Fusion, LiFi) plus Uniswap AMM pools. AMM depth may be thin; RFQ quotes are a second price surface to add.
-- On an L2, check the sequencer uptime feed before trusting a price.
+- Feeds are **24/5** with a 24h heartbeat and a 0.5% deviation threshold; on weekends and holidays they hold the last price.
+- `/rhj/assets` returns `currentMultiplier` and `pendingMultiplier`; the latter names a queued split or distribution before it lands.
+- Trading is RFQ (via `RobinHoodSettler`) plus Uniswap V3 and V4 pools. V4 carries the pool count, V3 carries the depth.
 
 ## Roadmap to Buildathon (Sept 14, 2026)
 
