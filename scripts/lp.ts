@@ -29,7 +29,12 @@
  * leaves, the position has been converted entirely into whichever side was
  * falling and stops earning anything at all.
  *
- * Usage: npm run lp -- --symbol AMC [--hours 8] [--notional 10000] [--width 1] [--json]
+ * The window can be placed in the past with --endHoursAgo, which is how the two
+ * regimes get compared: the US session, when the underlying actually moves and
+ * a band gets run over, against the overnight hours, when it does not.
+ *
+ * Usage: npm run lp -- --symbol AMC [--hours 8] [--endHoursAgo 0]
+ *                     [--notional 10000] [--width 1] [--json]
  */
 
 import { decodeAbiParameters, encodeFunctionData, getAddress, keccak256, toHex, type Address, type Hex } from "viem";
@@ -58,6 +63,12 @@ export type Leg = {
   inRangePct: number;
   /** How much of the in-range book this position would itself be. */
   poolSharePct: number;
+  /**
+   * How far the token has to move, in either direction, before the impermanent
+   * loss cancels the fees this window earned. The strategy is short volatility:
+   * this is the price at which being paid to make a market stops paying.
+   */
+  breakEvenMovePct: number | null;
 };
 
 export type LpResult = {
@@ -78,6 +89,7 @@ const symbol = (arg("--symbol") ?? "").toUpperCase();
 const hours = Number(arg("--hours", "8"));
 const notionalUsd = Number(arg("--notional", "10000"));
 const widthPct = Number(arg("--width", "1"));
+const endHoursAgo = Number(arg("--endHoursAgo", "0"));
 if (!symbol) throw new Error("usage: npm run lp -- --symbol AMC [--hours 8] [--notional 10000]");
 
 const cfg = loadCfg();
@@ -114,9 +126,11 @@ const usdOf = (P: number) => quoteIsToken0
   ? { p0: quoteUsd, p1: quoteUsd / P }
   : { p0: P * quoteUsd, p1: quoteUsd };
 
-const head = await withRetry(() => client.getBlockNumber(), "blockNumber");
-// ~0.101 s/block, measured; refined below from the actual timestamps.
-const span = BigInt(Math.round((hours * 3600) / 0.101));
+const tip = await withRetry(() => client.getBlockNumber(), "blockNumber");
+// ~0.101 s/block, measured; both ends are refined below from real timestamps.
+const BLOCKS_PER_SEC = 1 / 0.101;
+const head = tip - BigInt(Math.round(endHoursAgo * 3600 * BLOCKS_PER_SEC));
+const span = BigInt(Math.round(hours * 3600 * BLOCKS_PER_SEC));
 const from = head - span;
 const [b0, b1] = await Promise.all([
   withRetry(() => client.getBlock({ blockNumber: from }), "b0"),
@@ -167,7 +181,7 @@ function replay(label: string, sqrtLo: number, sqrtHi: number): Leg {
   };
 
   const perL = valueUsd(1, sqrtStart, usdStart);
-  if (!(perL > 0)) return { label, feesUsd: 0, positionUsd: 0, holdUsd: 0, impermanentLossUsd: 0, netUsd: 0, netPct: 0, annualisedPct: 0, inRangePct: 0, poolSharePct: 0 };
+  if (!(perL > 0)) return { label, feesUsd: 0, positionUsd: 0, holdUsd: 0, impermanentLossUsd: 0, netUsd: 0, netPct: 0, annualisedPct: 0, inRangePct: 0, poolSharePct: 0, breakEvenMovePct: null };
   const L = notionalUsd / perL;
   const start = amounts(L, sqrtStart);
 
@@ -193,14 +207,30 @@ function replay(label: string, sqrtLo: number, sqrtHi: number): Leg {
   const feesUsd = (fee0 / 10 ** dec0) * usdEnd.p0 + (fee1 / 10 ** dec1) * usdEnd.p1;
   const impermanentLossUsd = positionUsd - holdUsd;
   const netUsd = feesUsd + impermanentLossUsd;
+
+  // Same position, same fees, but ask what a move of m would have cost. Beyond
+  // the band the position is entirely one asset while the holder is still half
+  // in the other, so the loss keeps growing linearly — this walks outwards until
+  // it swallows the fees.
+  let breakEvenMovePct: number | null = null;
+  for (let m = 0.1; m <= 90; m += 0.1) {
+    const sqrtShocked = sqrtStart * Math.sqrt(1 - m / 100);
+    const usdShock = usdOf(priceOf(sqrtShocked));
+    const pos = valueUsd(L, sqrtShocked, usdShock);
+    const hold = (start.a0 / 10 ** dec0) * usdShock.p0 + (start.a1 / 10 ** dec1) * usdShock.p1;
+    if (feesUsd + (pos - hold) <= 0) { breakEvenMovePct = m; break; }
+  }
+
   return {
-    label, feesUsd, positionUsd, holdUsd, impermanentLossUsd, netUsd,
+    label, feesUsd, positionUsd, holdUsd, impermanentLossUsd, netUsd, breakEvenMovePct,
     netPct: (netUsd / notionalUsd) * 100,
     annualisedPct: (netUsd / notionalUsd) * (8760 / (seconds / 3600)) * 100,
     inRangePct: (inRange / swaps.length) * 100,
     poolSharePct: inRange ? (shareSum / inRange) * 100 : 0,
   };
 }
+
+const concentration = (poolRow.depthScore ?? 0) / (poolRow.tvlUsd || 1);
 
 // Volume is a property of the pool, not of any one position.
 let vol0 = 0, vol1 = 0;
@@ -210,15 +240,23 @@ const sqrtEnd = swaps[swaps.length - 1].sqrtP;
 const priceEnd = priceOf(sqrtEnd);
 const usdEnd = usdOf(priceEnd);
 
-const band = Math.sqrt(1 + widthPct / 100);
+/**
+ * A symmetric band [P/k, P*k] concentrates capital by 1/(1 - 1/sqrt(k)), so the
+ * band that matches what this pool's LPs are actually running is k = (c/(c-1))^2
+ * for an observed concentration c. Simulating a ±1% band and calling it "what
+ * LPs get here" would be measuring a position nobody holds.
+ */
+const bandFor = (pct: number) => Math.sqrt(1 + pct / 100);
+const matchedK = concentration > 1.05 ? (concentration / (concentration - 1)) ** 2 : 1.5;
+const matchedPct = (matchedK - 1) * 100;
 const legs = [
   replay("full range", sqrtStart / 1e6, sqrtStart * 1e6),
-  replay(`±${widthPct}% band`, sqrtStart / band, sqrtStart * band),
+  replay(`±${matchedPct.toFixed(1)}% — this pool's actual ${concentration.toFixed(0)}x`, sqrtStart / Math.sqrt(matchedK), sqrtStart * Math.sqrt(matchedK)),
+  replay(`±${widthPct}% band`, sqrtStart / bandFor(widthPct), sqrtStart * bandFor(widthPct)),
 ];
 
 const poolVolumeUsd = (vol0 / 10 ** dec0) * usdEnd.p0 + (vol1 / 10 ** dec1) * usdEnd.p1;
 const poolFeesUsd = poolVolumeUsd * feeRate;
-const concentration = (poolRow.depthScore ?? 0) / (poolRow.tvlUsd || 1);
 
 const result: LpResult = {
   symbol, pool, feeBps: feePpm / 100,
@@ -252,6 +290,7 @@ if (args.includes("--json")) {
     "annualised": `${l.annualisedPct >= 0 ? "+" : ""}${l.annualisedPct.toFixed(0)}%`,
     "earning": `${l.inRangePct.toFixed(0)}% of swaps`,
     "you'd be": `${l.poolSharePct.toFixed(1)}% of the book`,
+    "wiped out by a move of": l.breakEvenMovePct == null ? ">90%" : `${l.breakEvenMovePct.toFixed(1)}%`,
   })));
   console.log(`on ${u(notionalUsd)} deposited at the start of the window. One window is not a return —`);
   console.log(`the annualised column is arithmetic, not a forecast.\n`);
