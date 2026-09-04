@@ -1,0 +1,52 @@
+name: snapshot
+
+on:
+  schedule:
+    # Hourly at :07. GitHub's scheduler is best-effort and drops/delays runs under load —
+    # gaps are expected. Treat this as the free baseline series, not a guaranteed feed.
+    - cron: "7 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Collect
+        env:
+          # Optional: set a private RPC in repo Settings -> Secrets -> Actions as RPC_URL.
+          # Falls back to the public endpoint in config/chain.json when unset.
+          RPC_URL: ${{ secrets.RPC_URL }}
+        run: npm run snapshot
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name  "offhours-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then
+            echo "no new data"; exit 0
+          fi
+          git commit -m "snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push && exit 0
+            echo "push attempt $i failed, retrying"; sleep 5
+          done
+          exit 1

@@ -1,0 +1,15 @@
+{
+  "chainId": 4663,
+  "rpcUrl": "https://rpc.mainnet.chain.robinhood.com",
+  "swapRouter02": "0xCaf681a66D020601342297493863E78C959E5cb2",
+  "quoteTokens": [
+    { "symbol": "USDG", "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "usd": true },
+    { "symbol": "USDe", "address": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34", "usd": true }
+  ],
+  "seedAssets": [
+    { "symbol": "AAPL",  "token": "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9", "feed": "0x6B22A786bAa607d76728168703a39Ea9C99f2cD0" },
+    { "symbol": "GOOGL", "token": "0x2e0847e8910a9732eb3fb1bb4b70a580adad4fe3", "feed": "0xF6f373a037c30F0e5010d854385cA89185AE638b" },
+    { "symbol": "USO",   "token": "0xa30fa36db767ad9ed3f7a60fc79526fb4d56d344", "feed": "0x75a9c76Ef439e2C7c2E5a34Ab105EcFe3766431c" },
+    { "symbol": "SPCX",  "token": "0x4a0e65a3eccec6dbe60ae065f2e7bb85fae35eea", "feed": "0xB265810950ba6c5C0Ff821c9963014a56fD8Bffb" }
+  ]
+}
