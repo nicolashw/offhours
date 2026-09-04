@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "verify": "tsx scripts/verify.ts",
-    "snapshot": "tsx scripts/snapshot.ts"
+    "snapshot": "tsx scripts/snapshot.ts",
+    "registry": "tsx scripts/registry-refresh.ts",
+    "discover": "tsx scripts/discover.ts"
   },
   "dependencies": {
     "viem": "^2.21.0"

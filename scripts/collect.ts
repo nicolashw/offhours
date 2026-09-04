@@ -1,41 +1,44 @@
 /**
  * OffHours — core collector.
  *
- * Reads, per Stock Token on Robinhood Chain (4663):
- *   - Chainlink feed price + updatedAt  (feeds are deviation-triggered; staleness is itself a signal)
- *   - ERC-8056 uiMultiplier()           (1e18 scaled — confirmed empirically 2026-09-04)
- *   - Uniswap V3 pool prices against every configured quote (USD stables + WETH)
- *   - USD price of the token, converting WETH-quoted pools via a derived ETH/USD
- *   - premiumBps = poolUsd / feedPrice - 1
+ * One pass over every Robinhood Stock Token on Robinhood Chain (4663), reading:
  *
- * Read-only. No signing, no custody, no execution.
+ *   - the Chainlink reference price and, just as importantly, its age. These
+ *     feeds are 24h-heartbeat / 0.5%-deviation, `us_equities_24/5`: a reference
+ *     that has not moved for eleven hours is behaving exactly as specified, so
+ *     age is a first-class field, not an error flag.
+ *   - the ERC-8056 uiMultiplier(), cross-checked against Robinhood's own REST
+ *     value. Anything reading balanceOf() alone is wrong by this factor.
+ *   - Uniswap V3 pool prices (contracts) and V4 pool prices (storage entries in
+ *     the singleton PoolManager, read via extsload).
+ *   - USD conversion through the on-chain USDG/USDe/ETH Chainlink feeds rather
+ *     than a circular pool-derived rate.
+ *
+ * premiumBps compares the live AMM price against that reference. During the US
+ * session it is a genuine basis. Outside it — the OffHours case — the reference
+ * is frozen at the last regular-session print, so the same number reads as the
+ * market's implied view of the next open. The snapshot records marketPhase and
+ * feed age so the two are never conflated.
+ *
+ * Read-only throughout. No signing, no custody, no execution.
  */
 
-import { createPublicClient, http, formatUnits, getAddress, type Address } from "viem";
-import { readFileSync, existsSync } from "node:fs";
+import { encodeFunctionData, decodeAbiParameters, formatUnits, getAddress, type Address, type Hex } from "viem";
+import { loadCfg, makeClient, multicall, withRetry, type Cfg, type CallResult } from "./rpc.js";
+import { loadRegistry, type Asset } from "./registry.js";
+import { loadPools, type Pools } from "./pools.js";
+import { extsloadCalldata, stateSlotOf, addSlot, decodeSlot0, decodeLiquidity, LIQUIDITY_OFFSET } from "./v4.js";
+import { marketPhase, type Phase } from "./market.js";
 
-export type QuoteCfg = { symbol: string; address: Address; usd: boolean };
-export type Cfg = {
-  chainId: number;
-  rpcUrl: string;
-  swapRouter02: Address;
-  quoteTokens: QuoteCfg[];
-  seedAssets: Array<{ symbol: string; token: Address; feed?: Address }>;
-};
+export { loadCfg } from "./rpc.js";
 
-export function loadCfg(path = "config/chain.json"): Cfg {
-  const c = JSON.parse(readFileSync(path, "utf8"));
-  if (existsSync(".env")) {
-    for (const line of readFileSync(".env", "utf8").split("\n")) {
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
-    }
-  }
-  if (process.env.RPC_URL) c.rpcUrl = process.env.RPC_URL;
-  return c;
-}
+const erc20Abi = [
+  { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
+  { type: "function", name: "totalSupply", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "uiMultiplier", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+] as const;
 
-const aggregatorV3Abi = [
+const feedAbi = [
   { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
   { type: "function", name: "latestRoundData", stateMutability: "view", inputs: [], outputs: [
       { name: "roundId", type: "uint80" }, { name: "answer", type: "int256" },
@@ -43,24 +46,7 @@ const aggregatorV3Abi = [
       { name: "answeredInRound", type: "uint80" }] },
 ] as const;
 
-const erc20Abi = [
-  { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
-  { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] },
-  { type: "function", name: "totalSupply", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-  { type: "function", name: "uiMultiplier", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-] as const;
-
-const swapRouter02Abi = [
-  { type: "function", name: "factory", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
-  { type: "function", name: "WETH9", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
-] as const;
-
-const uniV3FactoryAbi = [
-  { type: "function", name: "getPool", stateMutability: "view",
-    inputs: [{ type: "address" }, { type: "address" }, { type: "uint24" }], outputs: [{ type: "address" }] },
-] as const;
-
-const uniV3PoolAbi = [
+const v3PoolAbi = [
   { type: "function", name: "token0", stateMutability: "view", inputs: [], outputs: [{ type: "address" }] },
   { type: "function", name: "liquidity", stateMutability: "view", inputs: [], outputs: [{ type: "uint128" }] },
   { type: "function", name: "slot0", stateMutability: "view", inputs: [], outputs: [
@@ -70,171 +56,280 @@ const uniV3PoolAbi = [
       { name: "unlocked", type: "bool" }] },
 ] as const;
 
-const FEE_TIERS = [100, 500, 3000, 10000] as const;
-const ZERO = "0x0000000000000000000000000000000000000000";
+/** Below this much virtual quote depth, a pool price is indicative at best. */
+const MIN_DEPTH_USD = Number(process.env.MIN_DEPTH_USD ?? 5_000);
 
-export type PoolQuote = { pool: Address; quoteSymbol: string; usd: boolean; fee: number; price: number; liquidity: string };
-export type Row = {
-  symbol: string; token: Address; feed: Address | null;
-  decimals?: number; uiMultiplier?: number | null;
-  feedPrice?: number; feedUpdatedAt?: string; feedAgeSec?: number; stale?: boolean;
-  pools?: PoolQuote[]; bestPool?: string; bestQuote?: string; poolPrice?: number;
-  poolUsd?: number; premiumBps?: number; impliedEthUsd?: number; error?: string;
+const call = (target: Address, callData: Hex) => ({ target, callData });
+const cd = (abi: any, functionName: string) => encodeFunctionData({ abi, functionName }) as Hex;
+
+/** Chainlink round, with the metadata needed to judge whether it still means anything. */
+export type FeedRead = {
+  address: Address; price: number; updatedAt: string; ageSec: number;
+  heartbeat: number | null; thresholdPct: number | null;
+  /** fresh <1h · aging <heartbeat · beyond-heartbeat = the feed has missed its own SLA */
+  state: "fresh" | "aging" | "beyond-heartbeat";
 };
+
+export type PoolRead = {
+  venue: "v3" | "v4";
+  id: string;                 // pool address (v3) or poolId (v4)
+  quote: string;
+  fee: number;
+  dynamicFee?: boolean;
+  tickSpacing?: number;
+  hooks?: Address;
+  price: number;              // token priced in the quote asset
+  priceUsd: number | null;
+  liquidity: string;
+  /**
+   * Virtual quote-side reserve at the current tick, in USD.
+   *
+   * A drained concentrated-liquidity pool keeps its last sqrtPrice in storage
+   * forever, so price alone cannot tell a live market from a fossil — several
+   * tokens here quote a 15-19% "premium" out of pools with L = 0. This is the
+   * number that separates them: y = L * sqrt(P) for a quote-as-token1 pool,
+   * x = L / sqrt(P) when the quote is token0. It is the depth backing the
+   * current price, not withdrawable TVL.
+   */
+  quoteDepthUsd: number | null;
+};
+
+export type Row = {
+  symbol: string; name: string; token: Address; decimals: number;
+  isin: string | null;
+  uiMultiplier: number | null;      // on-chain ERC-8056
+  restMultiplier: number | null;    // Robinhood's own value
+  multiplierMismatch: boolean;      // the two disagree beyond float noise — investigate before trusting balances
+  rawTotalSupply: number | null;    // balanceOf/totalSupply units, pre-multiplier
+  adjTotalSupply: number | null;    // what a share count actually is
+  feed: FeedRead | null;
+  pools: PoolRead[];
+  best: { venue: string; id: string; quote: string; priceUsd: number; quoteDepthUsd: number | null } | null;
+  poolUsd: number | null;
+  /** Total virtual quote depth across every live pool for this token, in USD. */
+  depthUsd: number;
+  /**
+   * How much the premium is worth believing:
+   *   ok    — the price comes from a pool with real depth behind it
+   *   thin  — priced, but under MIN_DEPTH_USD; treat as indicative only
+   *   empty — every pool has L = 0; the price is a fossil of the last trade
+   *   none  — no pool, or no Chainlink reference to compare against
+   */
+  quality: "ok" | "thin" | "empty" | "none";
+  premiumBps: number | null;
+  /** premiumBps, but only when the market is shut and the reference is frozen. */
+  impliedMoveBps: number | null;
+  note?: string;
+};
+
 export type Snapshot = {
-  ts: string; chainId: number; block: string; tokenSource: string;
-  factory: string | null; weth9: string | null; ethUsd: number | null; ethUsdSource: string;
+  ts: string; chainId: number; block: string;
+  market: { phase: Phase; etTime: string; offHours: boolean };
+  registryFetchedAt: string; poolsDiscoveredAt: string;
+  quotes: Record<string, { address: Address; usd: number | null; decimals: number; feedAgeSec: number | null }>;
+  counts: { assets: number; withFeed: number; withPool: number; priced: number; trustworthy: number; beyondHeartbeat: number };
   rows: Row[];
 };
 
-/** Price of `token` in the quote token, from sqrtPriceX96. */
-function poolPriceOfToken(sqrtPriceX96: bigint, token0: Address, token: Address, tokenDec: number, quoteDec: number): number {
+/** Depth backing the quoted price: the virtual quote reserve at the current tick. */
+function quoteDepth(sqrtPriceX96: bigint, liquidity: bigint, quoteIsToken0: boolean, quoteDec: number): number | null {
+  if (liquidity === 0n) return 0;
+  const sqrtP = Number(sqrtPriceX96) / 2 ** 96;
+  if (!isFinite(sqrtP) || sqrtP <= 0) return null;
+  const L = Number(liquidity);
+  const raw = quoteIsToken0 ? L / sqrtP : L * sqrtP;
+  const v = raw / 10 ** quoteDec;
+  return isFinite(v) ? v : null;
+}
+
+function priceFromSqrt(sqrtPriceX96: bigint, token0: Address, token: Address, tokenDec: number, quoteDec: number): number {
   const sqrtP = Number(sqrtPriceX96) / 2 ** 96;
   const p1per0 = sqrtP * sqrtP;
   const isT0 = token0.toLowerCase() === token.toLowerCase();
   return (isT0 ? p1per0 : 1 / p1per0) * 10 ** (tokenDec - quoteDec);
 }
 
-function median(xs: number[]): number | null {
-  const v = xs.filter((x) => isFinite(x) && x > 0).sort((a, b) => a - b);
-  if (!v.length) return null;
-  const m = Math.floor(v.length / 2);
-  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+function decodeFeed(dRes: CallResult, rRes: CallResult, address: Address, a: Asset | null, now: number): FeedRead | null {
+  if (!dRes.success || !rRes.success) return null;
+  const [dec] = decodeAbiParameters([{ type: "uint8" }], dRes.returnData) as [number];
+  const r = decodeAbiParameters(
+    [{ type: "uint80" }, { type: "int256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint80" }],
+    rRes.returnData,
+  ) as [bigint, bigint, bigint, bigint, bigint];
+  const price = Number(formatUnits(r[1], dec));
+  const updated = Number(r[3]);
+  const ageSec = now - updated;
+  const heartbeat = a?.feedHeartbeat ?? null;
+  const state: FeedRead["state"] =
+    ageSec < 3600 ? "fresh" : heartbeat && ageSec >= heartbeat ? "beyond-heartbeat" : "aging";
+  return {
+    address, price, updatedAt: new Date(updated * 1000).toISOString(), ageSec,
+    heartbeat, thresholdPct: a?.feedThresholdPct ?? null, state,
+  };
 }
 
-export async function collect(cfg: Cfg, opts: { dumpRest?: boolean } = {}): Promise<Snapshot> {
-  const client = createPublicClient({ transport: http(cfg.rpcUrl) });
-  const [chainId, block] = await Promise.all([client.getChainId(), client.getBlockNumber()]);
+export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
+  const client = makeClient(cfg);
+  const reg = loadRegistry();
+  const pools: Pools = loadPools();
+  const now = Math.floor(Date.now() / 1000);
+  const block = await withRetry(() => client.getBlockNumber(), "blockNumber");
 
-  let factory: Address | null = null, weth: Address | null = null;
-  try {
-    [factory, weth] = await Promise.all([
-      client.readContract({ address: cfg.swapRouter02, abi: swapRouter02Abi, functionName: "factory" }) as Promise<Address>,
-      client.readContract({ address: cfg.swapRouter02, abi: swapRouter02Abi, functionName: "WETH9" }) as Promise<Address>,
-    ]);
-  } catch { /* keep null */ }
-
-  const quotes: QuoteCfg[] = [
-    ...cfg.quoteTokens.map((q) => ({ ...q, address: getAddress(q.address) })),
-    ...(weth ? [{ symbol: "WETH", address: getAddress(weth), usd: false }] : []),
-  ];
-
-  // ---- ETH/USD from a WETH<>stable pool, else derived later from token cross-rates ----
-  let ethUsd: number | null = null;
-  let ethUsdSource = "none";
-  const stables = quotes.filter((q) => q.usd);
-  if (weth && factory && stables.length) {
-    const cands: Array<{ p: number; liq: bigint }> = [];
-    for (const s of stables) for (const fee of FEE_TIERS) {
-      try {
-        const pool = (await client.readContract({ address: factory, abi: uniV3FactoryAbi, functionName: "getPool", args: [weth, s.address, fee] })) as Address;
-        if (!pool || pool.toLowerCase() === ZERO) continue;
-        const [t0, slot0, liq, sDec] = await Promise.all([
-          client.readContract({ address: pool, abi: uniV3PoolAbi, functionName: "token0" }),
-          client.readContract({ address: pool, abi: uniV3PoolAbi, functionName: "slot0" }),
-          client.readContract({ address: pool, abi: uniV3PoolAbi, functionName: "liquidity" }),
-          client.readContract({ address: s.address, abi: erc20Abi, functionName: "decimals" }),
-        ]);
-        cands.push({ p: poolPriceOfToken(slot0[0], t0 as Address, weth, 18, sDec), liq: liq as bigint });
-      } catch { /* skip */ }
+  // ---- quote assets: decimals + their own Chainlink USD price ----
+  const qCalls = cfg.quoteTokens.flatMap((q) => [
+    call(getAddress(q.address), cd(erc20Abi, "decimals")),
+    ...(q.feed ? [call(getAddress(q.feed), cd(feedAbi, "decimals")), call(getAddress(q.feed), cd(feedAbi, "latestRoundData"))] : []),
+  ]);
+  const qRes = await multicall(client, cfg, qCalls);
+  const quotes: Snapshot["quotes"] = {};
+  const quoteDec = new Map<string, number>();
+  const quoteUsd = new Map<string, number>();
+  {
+    let i = 0;
+    for (const q of cfg.quoteTokens) {
+      const dRes = qRes[i++];
+      const dec = dRes.success ? (decodeAbiParameters([{ type: "uint8" }], dRes.returnData) as [number])[0] : 18;
+      let usd: number | null = null, ageSec: number | null = null;
+      if (q.feed) {
+        const f = decodeFeed(qRes[i++], qRes[i++], getAddress(q.feed), null, now);
+        if (f) { usd = f.price; ageSec = f.ageSec; }
+      }
+      quoteDec.set(q.symbol, dec);
+      if (usd != null) quoteUsd.set(q.symbol, usd);
+      quotes[q.symbol] = { address: getAddress(q.address), usd, decimals: dec, feedAgeSec: ageSec };
     }
-    const best = cands.sort((a, b) => (a.liq > b.liq ? -1 : 1))[0];
-    if (best && best.p > 0) { ethUsd = best.p; ethUsdSource = "WETH/stable pool"; }
   }
 
-  // ---- asset discovery ----
-  let assets = cfg.seedAssets.map((a) => ({ ...a, token: getAddress(a.token), feed: a.feed ? getAddress(a.feed) : undefined }));
-  let tokenSource = "config.seedAssets";
-  try {
-    const res = await fetch("https://api.robinhood.com/rhj/assets", { headers: { accept: "application/json" } });
-    const raw = await res.text();
-    if (opts.dumpRest) { console.error("--- RAW /rhj/assets (first 4000 chars) ---"); console.error(raw.slice(0, 4000)); console.error("--- end ---"); }
-    const body: any = JSON.parse(raw);
-    const list: any[] = Array.isArray(body) ? body
-      : body.results ?? body.assets ?? body.data ?? body.items ?? body.tokens ?? [];
-    const out: typeof assets = [];
-    const walk = (a: any) => {
-      const symbol = a.symbol ?? a.ticker ?? a.underlying_symbol ?? a.underlyingSymbol;
-      const deployments: any[] = a.deployments ?? a.chains ?? a.per_chain ?? a.addresses ?? [];
-      const dep = deployments.find((d: any) => Number(d.chainId ?? d.chain_id) === cfg.chainId) ?? deployments[0];
-      const token = dep?.address ?? dep?.token_address ?? dep?.tokenAddress ?? a.address ?? a.contract_address ?? a.contractAddress;
-      const feed = dep?.priceFeed ?? dep?.price_feed ?? dep?.chainlink_feed ?? dep?.chainlinkFeed ?? a.price_feed ?? a.priceFeed;
-      if (symbol && token) out.push({ symbol, token: getAddress(token), feed: feed ? getAddress(feed) : undefined });
+  // ---- per-asset token state ----
+  const assets = reg.assets;
+  const tokCalls = assets.flatMap((a) => [
+    call(a.token, cd(erc20Abi, "uiMultiplier")),
+    call(a.token, cd(erc20Abi, "totalSupply")),
+  ]);
+  const tokRes = await multicall(client, cfg, tokCalls);
+
+  // ---- per-asset feeds ----
+  const feedAssets = assets.filter((a) => a.feed);
+  const feedCalls = feedAssets.flatMap((a) => [
+    call(a.feed!, cd(feedAbi, "decimals")),
+    call(a.feed!, cd(feedAbi, "latestRoundData")),
+  ]);
+  const feedRes = await multicall(client, cfg, feedCalls);
+  const feedBySymbol = new Map<string, FeedRead>();
+  feedAssets.forEach((a, i) => {
+    const f = decodeFeed(feedRes[i * 2], feedRes[i * 2 + 1], a.feed!, a, now);
+    if (f) feedBySymbol.set(a.symbol, f);
+  });
+
+  // ---- V3 pools ----
+  const v3Calls = pools.v3.flatMap((p) => [
+    call(p.pool, cd(v3PoolAbi, "token0")),
+    call(p.pool, cd(v3PoolAbi, "slot0")),
+    call(p.pool, cd(v3PoolAbi, "liquidity")),
+  ]);
+  const v3Res = v3Calls.length ? await multicall(client, cfg, v3Calls) : [];
+
+  // ---- V4 pools (singleton storage) ----
+  const v4Calls = pools.v4.flatMap((p) => {
+    const s = stateSlotOf(p.poolId);
+    return [
+      call(cfg.v4PoolManager, extsloadCalldata(s)),
+      call(cfg.v4PoolManager, extsloadCalldata(addSlot(s, LIQUIDITY_OFFSET))),
+    ];
+  });
+  const v4Res = v4Calls.length ? await multicall(client, cfg, v4Calls) : [];
+
+  // ---- assemble ----
+  const poolsBySymbol = new Map<string, PoolRead[]>();
+  const push = (s: string, p: PoolRead) => { const l = poolsBySymbol.get(s) ?? []; l.push(p); poolsBySymbol.set(s, l); };
+  const decBySymbol = new Map(assets.map((a) => [a.symbol, a.decimals]));
+  const toUsd = (price: number, quote: string) => {
+    const u = quoteUsd.get(quote);
+    return u != null && isFinite(price) ? price * u : null;
+  };
+
+  pools.v3.forEach((p, i) => {
+    const [t0r, s0r, lqr] = [v3Res[i * 3], v3Res[i * 3 + 1], v3Res[i * 3 + 2]];
+    if (!t0r?.success || !s0r?.success) return;
+    const [t0] = decodeAbiParameters([{ type: "address" }], t0r.returnData) as [Address];
+    const [sqrtP] = decodeAbiParameters([{ type: "uint160" }], `0x${s0r.returnData.slice(2, 66)}` as Hex) as [bigint];
+    if (sqrtP === 0n) return; // initialised but never priced
+    const liq = lqr?.success ? (decodeAbiParameters([{ type: "uint128" }], lqr.returnData) as [bigint])[0] : 0n;
+    const qDec = quoteDec.get(p.quote) ?? 18;
+    const price = priceFromSqrt(sqrtP, t0, p.token, decBySymbol.get(p.symbol) ?? 18, qDec);
+    const depth = quoteDepth(sqrtP, liq, t0.toLowerCase() !== p.token.toLowerCase(), qDec);
+    push(p.symbol, {
+      venue: "v3", id: p.pool, quote: p.quote, fee: p.fee, price, priceUsd: toUsd(price, p.quote),
+      liquidity: liq.toString(), quoteDepthUsd: depth == null ? null : toUsd(depth, p.quote),
+    });
+  });
+
+  pools.v4.forEach((p, i) => {
+    const [s0r, lqr] = [v4Res[i * 2], v4Res[i * 2 + 1]];
+    if (!s0r?.success) return;
+    const { sqrtPriceX96 } = decodeSlot0(s0r.returnData);
+    if (sqrtPriceX96 === 0n) return;
+    const liq = lqr?.success ? decodeLiquidity(lqr.returnData) : 0n;
+    const qDec = quoteDec.get(p.quote) ?? 18;
+    const price = priceFromSqrt(sqrtPriceX96, p.currency0, p.token, decBySymbol.get(p.symbol) ?? 18, qDec);
+    const depth = quoteDepth(sqrtPriceX96, liq, p.currency0.toLowerCase() !== p.token.toLowerCase(), qDec);
+    push(p.symbol, {
+      venue: "v4", id: p.poolId, quote: p.quote, fee: p.fee, dynamicFee: p.dynamicFee,
+      tickSpacing: p.tickSpacing, hooks: p.hooks, price, priceUsd: toUsd(price, p.quote),
+      liquidity: liq.toString(), quoteDepthUsd: depth == null ? null : toUsd(depth, p.quote),
+    });
+  });
+
+  const phase = marketPhase();
+  const rows: Row[] = assets.map((a, i) => {
+    const mRes = tokRes[i * 2], sRes = tokRes[i * 2 + 1];
+    const uiMultiplier = mRes?.success
+      ? Number((decodeAbiParameters([{ type: "uint256" }], mRes.returnData) as [bigint])[0]) / 1e18 : null;
+    const rawTotalSupply = sRes?.success
+      ? Number(formatUnits((decodeAbiParameters([{ type: "uint256" }], sRes.returnData) as [bigint])[0], a.decimals)) : null;
+    const mismatch =
+      uiMultiplier != null && a.restMultiplier != null && Math.abs(uiMultiplier - a.restMultiplier) > 1e-9;
+
+    const ps = (poolsBySymbol.get(a.symbol) ?? []).filter((p) => isFinite(p.price) && p.price > 0);
+    // Depth decides, not price: a drained pool still reports its last sqrtPrice.
+    const priced = ps.filter((p) => p.priceUsd != null);
+    const live = priced.filter((p) => (p.quoteDepthUsd ?? 0) > 0);
+    const best = [...(live.length ? live : priced)].sort((x, y) => (y.quoteDepthUsd ?? 0) - (x.quoteDepthUsd ?? 0))[0] ?? null;
+    const poolUsd = best?.priceUsd ?? null;
+    const depthUsd = live.reduce((s, p) => s + (p.quoteDepthUsd ?? 0), 0);
+
+    const feed = feedBySymbol.get(a.symbol) ?? null;
+    const premiumBps = poolUsd != null && feed && feed.price > 0
+      ? Math.round((poolUsd / feed.price - 1) * 10_000) : null;
+    const quality: Row["quality"] =
+      premiumBps == null ? "none" : !live.length ? "empty" : depthUsd < MIN_DEPTH_USD ? "thin" : "ok";
+
+    return {
+      symbol: a.symbol, name: a.name, token: a.token, decimals: a.decimals, isin: a.isin,
+      uiMultiplier, restMultiplier: a.restMultiplier, multiplierMismatch: mismatch,
+      rawTotalSupply,
+      adjTotalSupply: rawTotalSupply != null && uiMultiplier != null ? rawTotalSupply * uiMultiplier : null,
+      feed, pools: ps,
+      best: best ? { venue: best.venue, id: best.id, quote: best.quote, priceUsd: best.priceUsd!, quoteDepthUsd: best.quoteDepthUsd } : null,
+      poolUsd, depthUsd, quality, premiumBps,
+      impliedMoveBps: phase.offHours && quality === "ok" ? premiumBps : null,
+      note: !feed ? "no Chainlink reference — the AMM is the only price" : undefined,
     };
-    for (const a of list) walk(a);
-    if (out.length) {
-      const seedFeeds = new Map(assets.map((s) => [s.symbol, s.feed]));
-      assets = out.map((a) => (a.feed ? a : { ...a, feed: seedFeeds.get(a.symbol) }));
-      tokenSource = `api.robinhood.com/rhj/assets (${out.length})`;
-    } else {
-      tokenSource = `config.seedAssets (REST parsed but empty; keys=${Object.keys(body).join("|").slice(0, 120)})`;
-    }
-  } catch (e) {
-    tokenSource = `config.seedAssets (REST failed: ${(e as Error).message})`;
-  }
+  });
 
-  // ---- per-asset reads ----
-  const rows: Row[] = [];
-  const impliedEth: number[] = [];
-  for (const a of assets) {
-    const row: Row = { symbol: a.symbol, token: a.token, feed: a.feed ?? null };
-    try {
-      const [decimals] = await Promise.all([client.readContract({ address: a.token, abi: erc20Abi, functionName: "decimals" })]);
-      row.decimals = decimals;
-      try {
-        const m = await client.readContract({ address: a.token, abi: erc20Abi, functionName: "uiMultiplier" });
-        row.uiMultiplier = Number(m) / 1e18;
-      } catch { row.uiMultiplier = null; }
-
-      if (a.feed) {
-        const [fd, rd] = await Promise.all([
-          client.readContract({ address: a.feed, abi: aggregatorV3Abi, functionName: "decimals" }),
-          client.readContract({ address: a.feed, abi: aggregatorV3Abi, functionName: "latestRoundData" }),
-        ]);
-        row.feedPrice = Number(formatUnits(rd[1], fd));
-        const updatedAt = Number(rd[3]);
-        row.feedUpdatedAt = new Date(updatedAt * 1000).toISOString();
-        row.feedAgeSec = Math.floor(Date.now() / 1000) - updatedAt;
-        row.stale = row.feedAgeSec > 3600;
-      }
-
-      if (factory) {
-        const pools: PoolQuote[] = [];
-        for (const q of quotes) for (const fee of FEE_TIERS) {
-          const pool = (await client.readContract({ address: factory, abi: uniV3FactoryAbi, functionName: "getPool", args: [a.token, q.address, fee] })) as Address;
-          if (!pool || pool.toLowerCase() === ZERO) continue;
-          const [t0, slot0, liq, qDec] = await Promise.all([
-            client.readContract({ address: pool, abi: uniV3PoolAbi, functionName: "token0" }),
-            client.readContract({ address: pool, abi: uniV3PoolAbi, functionName: "slot0" }),
-            client.readContract({ address: pool, abi: uniV3PoolAbi, functionName: "liquidity" }),
-            client.readContract({ address: q.address, abi: erc20Abi, functionName: "decimals" }),
-          ]);
-          pools.push({ pool, quoteSymbol: q.symbol, usd: q.usd, fee,
-            price: poolPriceOfToken(slot0[0], t0 as Address, a.token, decimals, qDec), liquidity: (liq as bigint).toString() });
-        }
-        row.pools = pools;
-        const usdPools = pools.filter((p) => p.usd);
-        const best = (usdPools.length ? usdPools : pools).sort((x, y) => (BigInt(x.liquidity) > BigInt(y.liquidity) ? -1 : 1))[0];
-        if (best) {
-          row.bestPool = best.pool; row.bestQuote = best.quoteSymbol; row.poolPrice = best.price;
-          if (best.usd) row.poolUsd = best.price;
-          else {
-            // WETH-quoted: record implied ETH from this token's own feed for cross-check
-            if (row.feedPrice && best.price > 0) { row.impliedEthUsd = row.feedPrice / best.price; impliedEth.push(row.impliedEthUsd); }
-          }
-        }
-      }
-    } catch (e) { row.error = (e as Error).message; }
-    rows.push(row);
-  }
-
-  if (ethUsd == null) { const m = median(impliedEth); if (m) { ethUsd = m; ethUsdSource = "median of feed/WETH-pool cross-rates (circular — cross-check only)"; } }
-
-  for (const r of rows) {
-    if (r.poolUsd == null && r.poolPrice != null && r.bestQuote === "WETH" && ethUsd) r.poolUsd = r.poolPrice * ethUsd;
-    if (r.poolUsd != null && r.feedPrice) r.premiumBps = Math.round((r.poolUsd / r.feedPrice - 1) * 10_000);
-  }
-
-  return { ts: new Date().toISOString(), chainId, block: block.toString(), tokenSource,
-    factory, weth9: weth, ethUsd, ethUsdSource, rows };
+  return {
+    ts: new Date().toISOString(), chainId: cfg.chainId, block: block.toString(),
+    market: phase,
+    registryFetchedAt: reg.fetchedAt, poolsDiscoveredAt: pools.discoveredAt,
+    quotes,
+    counts: {
+      assets: rows.length,
+      withFeed: rows.filter((r) => r.feed).length,
+      withPool: rows.filter((r) => r.pools.length).length,
+      priced: rows.filter((r) => r.premiumBps != null).length,
+      trustworthy: rows.filter((r) => r.quality === "ok").length,
+      beyondHeartbeat: rows.filter((r) => r.feed?.state === "beyond-heartbeat").length,
+    },
+    rows,
+  };
 }

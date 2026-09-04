@@ -1,15 +1,34 @@
 {
   "chainId": 4663,
   "rpcUrl": "https://rpc.mainnet.chain.robinhood.com",
+
+  "multicall3": "0xcA11bde05977b3631167028862bE2a173976CA11",
   "swapRouter02": "0xCaf681a66D020601342297493863E78C959E5cb2",
+  "v3Factory": "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA",
+  "v4PoolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+  "weth9": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+
+  "sources": {
+    "assets": "https://api.robinhood.com/rhj/assets",
+    "chainlinkFeeds": "https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json"
+  },
+
   "quoteTokens": [
-    { "symbol": "USDG", "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "usd": true },
-    { "symbol": "USDe", "address": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34", "usd": true }
+    { "symbol": "USDG", "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", "usd": true,  "feed": "0x61B7e5650328764B076A108EFF5fa7282a1B9aD2" },
+    { "symbol": "USDe", "address": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34", "usd": true,  "feed": "0xb9fB4e65744E4178894f7C61CF80E8a48A5f224a" },
+    { "symbol": "WETH", "address": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", "usd": false, "feed": "0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9" }
   ],
-  "seedAssets": [
-    { "symbol": "AAPL",  "token": "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9", "feed": "0x6B22A786bAa607d76728168703a39Ea9C99f2cD0" },
-    { "symbol": "GOOGL", "token": "0x2e0847e8910a9732eb3fb1bb4b70a580adad4fe3", "feed": "0xF6f373a037c30F0e5010d854385cA89185AE638b" },
-    { "symbol": "USO",   "token": "0xa30fa36db767ad9ed3f7a60fc79526fb4d56d344", "feed": "0x75a9c76Ef439e2C7c2E5a34Ab105EcFe3766431c" },
-    { "symbol": "SPCX",  "token": "0x4a0e65a3eccec6dbe60ae065f2e7bb85fae35eea", "feed": "0xB265810950ba6c5C0Ff821c9963014a56fD8Bffb" }
+
+  "notedContracts": {
+    "RobinHoodSettler": "0x39b38686A19836Ac10162c490E4558e120CbBE5f",
+    "V4PoolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+    "SwapRouter02": "0xCaf681a66D020601342297493863E78C959E5cb2",
+    "BucketCore": "0xD6d9E6e40DEc4BBAE488Fe18c976A62343c8E7Cb",
+    "BeaconProxyDistributor": "0x6B0bFF8FeC9A047bE9691000959d819DE3E31550"
+  },
+
+  "extraPools": [
+    { "address": "0x02175608F1b5E6b5ed221cCFdC7Be197D111D915", "kind": "v3",     "note": "USO UniswapV3Pool seen in transfers" },
+    { "address": "0x98A27Fc90c643562f9793089acf2697aB4c0a880", "kind": "clpool", "note": "USO CLPool (concentrated-liquidity fork)" }
   ]
 }
