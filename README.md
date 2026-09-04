@@ -31,11 +31,39 @@ npm run discover             # pool discovery (V3 grid + V4 Initialize scan) -> 
 npm run verify               # premium / discount / staleness / multiplier table
 npm run snapshot             # append one line to data/YYYY-MM-DD.ndjson
 npm run holders -- --symbol USO   # true float, rebuilt from Transfer logs
+npm run mcp                  # MCP server over stdio, for agents
 ```
 
 `verify` takes `--all` for the full universe, `--symbol AAPL,NVDA` for pool-level detail,
 and `--json` for the raw snapshot. `discover` takes `--v3` / `--v4` / `--force` / `--symbol`
-and is resumable — the V4 crawl writes after every token.
+and is resumable — the V4 crawl writes after every token. It finishes with a state sweep that
+marks which V4 pools actually hold liquidity; 2,486 of 6,612 do, and skipping the rest is what
+keeps a full pass at ~25s instead of ~65s. Re-run it periodically, since new pools open
+constantly.
+
+### The agent-facing layer
+
+`npm run mcp` starts an MCP server over stdio exposing the same collector — not a
+reimplementation, because two code paths would eventually disagree about a price.
+
+| tool | answers |
+|---|---|
+| `list_stock_tokens` | what exists, with address, decimals, ISIN, multiplier, whether a feed exists, how much depth |
+| `get_premium_discount` | pool consensus vs Chainlink reference in bps, with reference age, depth, dispersion and market session |
+| `get_implied_price` | what the chain thinks a token is worth while the US market is shut |
+| `get_liquidity` | every V3 and V4 pool for a token, with the depth behind each price and which ones are outliers |
+| `get_feed_status` | reference age against its own heartbeat — the oracle-risk view |
+| `resolve_balance` | a wallet's real position: `balanceOf` x `uiMultiplier`, raw and adjusted side by side |
+| `get_holders` | true float, split into pools, protocol contracts and actual wallets |
+
+Add it to a client — for Claude Code:
+
+```bash
+claude mcp add offhours -- npx -y tsx /absolute/path/to/offhours/scripts/mcp.ts
+```
+
+Snapshots are memoised for `SNAPSHOT_TTL_MS` (default 120s) and every response carries the
+block and market session it came from. There is no tool that can move an asset.
 
 ### How it is put together
 
@@ -48,6 +76,7 @@ and is resumable — the V4 crawl writes after every token.
 | `scripts/holders.ts` | true float from Transfer logs, no explorer required |
 | `scripts/rpc.ts` | Multicall3 batching, backoff, log-range bisection |
 | `scripts/market.ts` | which US session a timestamp falls in |
+| `scripts/mcp.ts` | the same collector, exposed to agents over MCP |
 
 Discovery caches (`config/registry.json`, `config/pools.json`) are committed on purpose:
 CI and the dashboard stay deterministic, both keep working when an upstream is down, and the

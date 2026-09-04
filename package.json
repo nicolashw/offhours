@@ -9,7 +9,8 @@
     "snapshot": "tsx scripts/snapshot.ts",
     "registry": "tsx scripts/registry-refresh.ts",
     "discover": "tsx scripts/discover.ts",
-    "holders": "tsx scripts/holders.ts"
+    "holders": "tsx scripts/holders.ts",
+    "mcp": "tsx scripts/mcp.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -102,6 +102,9 @@ const multicall3Abi = [
   },
 ] as const;
 
+/** Multicall chunks in flight at once. Tuned against the public RPC's rate limiter. */
+const CONCURRENCY = Number(process.env.RPC_CONCURRENCY ?? 4);
+
 export type Call = { target: Address; callData: `0x${string}` };
 export type CallResult = { success: boolean; returnData: `0x${string}` };
 
@@ -132,12 +135,22 @@ export async function multicall(
       return [...(await run(slice.slice(0, mid))), ...(await run(slice.slice(mid)))];
     }
   };
-  const out: CallResult[] = [];
-  for (let i = 0; i < calls.length; i += chunk) {
-    out.push(...(await run(calls.slice(i, i + chunk))));
-    if (i + chunk < calls.length) await sleep(30);
-  }
-  return out;
+  // A full pass is ~14k reads, i.e. ~100 sequential round-trips at public-RPC
+  // latency — a minute of mostly waiting. A handful in flight at a time cuts
+  // that to seconds and still stays under the rate limiter.
+  const slices: Call[][] = [];
+  for (let i = 0; i < calls.length; i += chunk) slices.push(calls.slice(i, i + chunk));
+  const results: CallResult[][] = new Array(slices.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= slices.length) return;
+      results[i] = await run(slices[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, slices.length) }, worker));
+  return results.flat();
 }
 
 /**
@@ -162,7 +175,7 @@ export async function getLogsAdaptive(
         method: "eth_getLogs",
         params: [{ fromBlock: hex(from), toBlock: hex(to), address: filter.address, topics: filter.topics }],
       } as any),
-      "getLogs", 3,
+      "getLogs", 6,
     )) as any[];
     onProgress?.(from, to, logs.length);
     return logs;

@@ -26,7 +26,7 @@
 import { encodeFunctionData, decodeAbiParameters, formatUnits, getAddress, type Address, type Hex } from "viem";
 import { loadCfg, makeClient, multicall, withRetry, type Cfg, type CallResult } from "./rpc.js";
 import { loadRegistry, type Asset } from "./registry.js";
-import { loadPools, type Pools } from "./pools.js";
+import { loadPools, activeV4, type Pools } from "./pools.js";
 import { extsloadCalldata, stateSlotOf, addSlot, decodeSlot0, decodeLiquidity, LIQUIDITY_OFFSET } from "./v4.js";
 import { marketPhase, type Phase } from "./market.js";
 
@@ -205,6 +205,7 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
   const client = makeClient(cfg);
   const reg = loadRegistry();
   const pools: Pools = loadPools();
+  const v4Pools = activeV4(pools);
   const now = Math.floor(Date.now() / 1000);
   const block = await withRetry(() => client.getBlockNumber(), "blockNumber");
 
@@ -263,7 +264,7 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
   const v3Res = v3Calls.length ? await multicall(client, cfg, v3Calls) : [];
 
   // ---- V4 pools (singleton storage) ----
-  const v4Calls = pools.v4.flatMap((p) => {
+  const v4Calls = v4Pools.flatMap((p) => {
     const s = stateSlotOf(p.poolId);
     return [
       call(cfg.v4PoolManager, extsloadCalldata(s)),
@@ -297,7 +298,7 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
     });
   });
 
-  pools.v4.forEach((p, i) => {
+  v4Pools.forEach((p, i) => {
     const [s0r, lqr] = [v4Res[i * 2], v4Res[i * 2 + 1]];
     if (!s0r?.success) return;
     const { sqrtPriceX96 } = decodeSlot0(s0r.returnData);
