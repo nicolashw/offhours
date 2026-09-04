@@ -154,40 +154,51 @@ export async function multicall(
 }
 
 /**
- * eth_getLogs over an arbitrary range, bisecting on failure.
+ * eth_getLogs over a wide range, in windows, bisecting a window that fails.
  *
- * The public RPC refuses a wide query two ways — `exceeds limit of 10000` and
- * `log query timed out` — and both mean the same thing: ask for less. Splitting
- * on the error instead of using a fixed block step keeps a quiet contract at one
- * round-trip and only pays the split cost where the chain is actually busy.
+ * Purely reactive bisection is a trap here: the first attempt spans ~54M blocks
+ * and always fails, and with retry-and-backoff at every level the split tree
+ * costs minutes per branch before a single log comes back. So the range is
+ * walked in fixed windows and only a window that the node refuses gets split.
+ *
+ * The node refuses two ways — `exceeds limit of 10000` and `log query timed
+ * out` — and both mean the same thing: ask for less. Rate limiting is separate
+ * and is handled by withRetry, not by splitting.
  */
 export async function getLogsAdaptive(
   client: PublicClient,
   filter: { address: Address; topics: (Hex | Hex[] | null)[] },
   from: bigint, to: bigint,
   onProgress?: (from: bigint, to: bigint, n: number) => void,
-  depth = 0,
+  step = BigInt(process.env.LOG_WINDOW ?? 2_000_000),
 ): Promise<any[]> {
   const hex = (n: bigint) => `0x${n.toString(16)}` as Hex;
-  try {
-    const logs = (await withRetry(
-      () => client.request({
-        method: "eth_getLogs",
-        params: [{ fromBlock: hex(from), toBlock: hex(to), address: filter.address, topics: filter.topics }],
-      } as any),
-      "getLogs", 6,
-    )) as any[];
-    onProgress?.(from, to, logs.length);
-    return logs;
-  } catch (e) {
-    const msg = (e as Error).message;
-    const splittable = /exceeds limit|timed out|timeout|unknown RPC|response size|too large/i.test(msg);
-    if (!splittable || to - from < 5_000n || depth > 26) throw e;
-    const mid = from + (to - from) / 2n;
-    await sleep(150);
-    const lo = await getLogsAdaptive(client, filter, from, mid, onProgress, depth + 1);
-    await sleep(150);
-    const hi = await getLogsAdaptive(client, filter, mid + 1n, to, onProgress, depth + 1);
-    return [...lo, ...hi];
+
+  const fetchRange = async (lo: bigint, hi: bigint, depth: number): Promise<any[]> => {
+    try {
+      const logs = (await withRetry(
+        () => client.request({
+          method: "eth_getLogs",
+          params: [{ fromBlock: hex(lo), toBlock: hex(hi), address: filter.address, topics: filter.topics }],
+        } as any),
+        "getLogs", 4,
+      )) as any[];
+      onProgress?.(lo, hi, logs.length);
+      return logs;
+    } catch (e) {
+      const msg = errText(e);
+      const splittable = /exceeds limit|timed out|timeout|unknown RPC|response size|too large|missing or invalid/i.test(msg);
+      if (!splittable || hi - lo < 2_000n || depth > 14) throw e;
+      const mid = lo + (hi - lo) / 2n;
+      return [...(await fetchRange(lo, mid, depth + 1)), ...(await fetchRange(mid + 1n, hi, depth + 1))];
+    }
+  };
+
+  const out: any[] = [];
+  for (let lo = from; lo <= to; lo += step) {
+    const hi = lo + step - 1n > to ? to : lo + step - 1n;
+    out.push(...(await fetchRange(lo, hi, 0)));
+    await sleep(60);
   }
+  return out;
 }

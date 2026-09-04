@@ -65,9 +65,9 @@ async function v4LogsFor(cfg: Cfg, token: Address, from: bigint, to: bigint): Pr
   const client = makeClient(cfg);
   const pad = (a: Address) => `0x${a.slice(2).toLowerCase().padStart(64, "0")}` as Hex;
   const f = { address: cfg.v4PoolManager };
-  const asC0 = await getLogsAdaptive(client, { ...f, topics: [INITIALIZE_TOPIC, null, pad(token)] }, from, to);
+  const asC0 = await getLogsAdaptive(client, { ...f, topics: [INITIALIZE_TOPIC, null, pad(token)] }, from, to, undefined, to - from + 1n);
   await sleep(200);
-  const asC1 = await getLogsAdaptive(client, { ...f, topics: [INITIALIZE_TOPIC, null, null, pad(token)] }, from, to);
+  const asC1 = await getLogsAdaptive(client, { ...f, topics: [INITIALIZE_TOPIC, null, null, pad(token)] }, from, to, undefined, to - from + 1n);
   return [...asC0, ...asC1];
 }
 

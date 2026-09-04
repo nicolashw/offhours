@@ -32,6 +32,10 @@ import { marketPhase, type Phase } from "./market.js";
 
 export { loadCfg } from "./rpc.js";
 
+const erc20BalanceAbi = [
+  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }] },
+] as const;
+
 const erc20Abi = [
   { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
   { type: "function", name: "totalSupply", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
@@ -85,16 +89,29 @@ export type PoolRead = {
   priceUsd: number | null;
   liquidity: string;
   /**
-   * Virtual quote-side reserve at the current tick, in USD.
-   *
-   * A drained concentrated-liquidity pool keeps its last sqrtPrice in storage
-   * forever, so price alone cannot tell a live market from a fossil — several
-   * tokens here quote a 15-19% "premium" out of pools with L = 0. This is the
-   * number that separates them: y = L * sqrt(P) for a quote-as-token1 pool,
-   * x = L / sqrt(P) when the quote is token0. It is the depth backing the
-   * current price, not withdrawable TVL.
+   * Quote-normalised liquidity: y = L*sqrt(P), or x = L/sqrt(P) when the quote
+   * is token0. Comparable across pools of the same token and zero for a drained
+   * one, which is what makes it useful — but NOT a dollar amount. It is the
+   * virtual reserve of a full-range position with this L, and for the tight
+   * ranges these pools actually use it overshoots wildly: SGOV's deepest pool
+   * scores $1.19B against a token whose entire supply is worth $1.5M.
    */
-  quoteDepthUsd: number | null;
+  depthScore: number | null;
+  /**
+   * Real money in the pool, in USD.
+   *
+   * V3 pools hold their own reserves, so this is `balanceOf` on both sides —
+   * exact. V4 pools do not exist as contracts and their reserves are commingled
+   * inside the singleton PoolManager, so per-pool reserves cannot be read at
+   * all; the manager's balance of the token is apportioned across that token's
+   * V4 pools by depthScore and doubled for the quote side. `tvlBasis` says
+   * which of the two you are looking at.
+   */
+  tvlUsd: number | null;
+  tvlBasis?: "reserves" | "allocated";
+  /** Reserve inputs, kept so TVL can be valued at the consensus price rather than the pool's own. */
+  tokenUnits?: number | null;
+  quoteSideUsd?: number | null;
   /**
    * Priced more than OUTLIER_TOL away from the depth-weighted median of this
    * token's live pools, so excluded from the consensus.
@@ -117,7 +134,7 @@ export type Row = {
   adjTotalSupply: number | null;    // what a share count actually is
   feed: FeedRead | null;
   pools: PoolRead[];
-  best: { venue: string; id: string; quote: string; priceUsd: number; quoteDepthUsd: number | null } | null;
+  best: { venue: string; id: string; quote: string; priceUsd: number; tvlUsd: number | null } | null;
   /** Depth-weighted price across every live pool — the venue-blind number. */
   poolUsd: number | null;
   /**
@@ -164,7 +181,7 @@ function weightedMedian(items: Array<{ p: number; w: number }>): number | null {
   return xs[xs.length - 1].p;
 }
 
-/** Depth backing the quoted price: the virtual quote reserve at the current tick. */
+/** Quote-normalised liquidity at the current tick (see PoolRead.depthScore). */
 function quoteDepth(sqrtPriceX96: bigint, liquidity: bigint, quoteIsToken0: boolean, quoteDec: number): number | null {
   if (liquidity === 0n) return 0;
   const sqrtP = Number(sqrtPriceX96) / 2 ** 96;
@@ -294,7 +311,7 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
     const depth = quoteDepth(sqrtP, liq, t0.toLowerCase() !== p.token.toLowerCase(), qDec);
     push(p.symbol, {
       venue: "v3", id: p.pool, quote: p.quote, fee: p.fee, price, priceUsd: toUsd(price, p.quote),
-      liquidity: liq.toString(), quoteDepthUsd: depth == null ? null : toUsd(depth, p.quote),
+      liquidity: liq.toString(), depthScore: depth == null ? null : toUsd(depth, p.quote), tvlUsd: null,
     });
   });
 
@@ -310,9 +327,53 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
     push(p.symbol, {
       venue: "v4", id: p.poolId, quote: p.quote, fee: p.fee, dynamicFee: p.dynamicFee,
       tickSpacing: p.tickSpacing, hooks: p.hooks, price, priceUsd: toUsd(price, p.quote),
-      liquidity: liq.toString(), quoteDepthUsd: depth == null ? null : toUsd(depth, p.quote),
+      liquidity: liq.toString(), depthScore: depth == null ? null : toUsd(depth, p.quote), tvlUsd: null,
     });
   });
+
+  // ---- real money in each pool ----
+  //
+  // depthScore is liquidity, not dollars, and for tight ranges it overshoots by
+  // orders of magnitude — so the weighting and the "is this a real market" gate
+  // both run on actual reserves instead.
+  //
+  // V3 pools custody their own tokens, so this is two balanceOf calls. V4 pools
+  // are storage entries and their reserves sit commingled in the singleton, so
+  // per-pool reserves do not exist to be read: the manager's balance of the
+  // token is split across that token's V4 pools by depthScore. Approximate, and
+  // labelled as such, but bounded by a real balance rather than by an
+  // extrapolation from L.
+  const balOf = (token: Address, holder: Address) =>
+    call(token, encodeFunctionData({ abi: erc20BalanceAbi, functionName: "balanceOf", args: [holder] }) as Hex);
+
+  const v3ForBal = pools.v3.filter((p) => (poolsBySymbol.get(p.symbol) ?? []).some((x) => x.id === p.pool));
+  const v4Symbols = [...new Set(v4Pools.map((p) => p.symbol))];
+  const balCalls = [
+    ...v3ForBal.flatMap((p) => [
+      balOf(p.token, p.pool),
+      balOf(getAddress(cfg.quoteTokens.find((q) => q.symbol === p.quote)!.address), p.pool),
+    ]),
+    ...v4Symbols.map((sym) => balOf(assets.find((a) => a.symbol === sym)!.token, cfg.v4PoolManager)),
+  ];
+  const balRes = balCalls.length ? await multicall(client, cfg, balCalls) : [];
+
+  const num = (r: CallResult | undefined, dec: number) =>
+    r?.success && r.returnData !== "0x"
+      ? Number(formatUnits((decodeAbiParameters([{ type: "uint256" }], r.returnData) as [bigint])[0], dec))
+      : null;
+
+  v3ForBal.forEach((p, i) => {
+    const pr = (poolsBySymbol.get(p.symbol) ?? []).find((x) => x.id === p.pool);
+    if (!pr) return;
+    pr.tokenUnits = num(balRes[i * 2], decBySymbol.get(p.symbol) ?? 18);
+    const qUnits = num(balRes[i * 2 + 1], quoteDec.get(p.quote) ?? 18);
+    pr.quoteSideUsd = qUnits == null ? null : toUsd(qUnits, p.quote);
+    pr.tvlBasis = "reserves";
+  });
+
+  const v4Base = v3ForBal.length * 2;
+  const v4ManagerUnits = new Map<string, number | null>();
+  v4Symbols.forEach((sym, i) => v4ManagerUnits.set(sym, num(balRes[v4Base + i], decBySymbol.get(sym) ?? 18)));
 
   const phase = marketPhase();
   const rows: Row[] = assets.map((a, i) => {
@@ -327,30 +388,49 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
     const ps = (poolsBySymbol.get(a.symbol) ?? []).filter((p) => isFinite(p.price) && p.price > 0);
     // Depth decides, not price: a drained pool still reports its last sqrtPrice.
     const priced = ps.filter((p) => p.priceUsd != null);
-    const live = priced.filter((p) => (p.quoteDepthUsd ?? 0) > 0);
+    // Liveness is decided by liquidity, not by reserves: tokens sent to a pool
+    // address sit in balanceOf without making it a market, and a pool at an
+    // extreme tick would otherwise value them at an absurd price and take over
+    // the median it is supposed to be judged against.
+    const live = priced.filter((p) => (p.depthScore ?? 0) > 0);
     // Robust centre first, then judge each pool against it. Without this step a
     // handful of never-traded 90%-fee V4 pools drag the consensus and blow up the
     // dispersion of otherwise tightly-arbitraged names.
-    const med = weightedMedian(live.map((p) => ({ p: p.priceUsd!, w: p.quoteDepthUsd ?? 0 })));
+    const med = weightedMedian(live.map((p) => ({ p: p.priceUsd!, w: p.depthScore ?? 0 })));
     if (med) for (const p of live) p.outlier = Math.abs(p.priceUsd! / med - 1) > OUTLIER_TOL;
     const core = live.filter((p) => !p.outlier);
 
     const best = [...(core.length ? core : live.length ? live : priced)]
-      .sort((x, y) => (y.quoteDepthUsd ?? 0) - (x.quoteDepthUsd ?? 0))[0] ?? null;
-    const depthUsd = core.reduce((s, p) => s + (p.quoteDepthUsd ?? 0), 0);
+      .sort((x, y) => (y.depthScore ?? 0) - (x.depthScore ?? 0))[0] ?? null;
 
     // Depth-weighted consensus rather than "whichever pool happens to be deepest":
     // with 6.6k V4 pools alongside V3, a single venue's quote is an opinion, and the
     // spread between the venues that agree is information in its own right.
     let poolUsd: number | null = null;
     let dispersionBps: number | null = null;
-    if (core.length && depthUsd > 0) {
-      poolUsd = core.reduce((s, p) => s + p.priceUsd! * (p.quoteDepthUsd ?? 0), 0) / depthUsd;
-      const varW = core.reduce((s, p) => s + (p.quoteDepthUsd ?? 0) * (p.priceUsd! - poolUsd!) ** 2, 0) / depthUsd;
+    const wTotal = core.reduce((s, p) => s + (p.depthScore ?? 0), 0);
+    if (core.length && wTotal > 0) {
+      poolUsd = core.reduce((s, p) => s + p.priceUsd! * (p.depthScore ?? 0), 0) / wTotal;
+      const varW = core.reduce((s, p) => s + (p.depthScore ?? 0) * (p.priceUsd! - poolUsd!) ** 2, 0) / wTotal;
       dispersionBps = poolUsd > 0 ? Math.round((Math.sqrt(varW) / poolUsd) * 10_000) : null;
     } else if (best) {
       poolUsd = best.priceUsd ?? null; // every pool drained: report the fossil, flagged as such
     }
+
+    // Now that there is a price worth trusting, value the reserves at it. Doing
+    // this the other way round lets a mispriced pool inflate its own weight.
+    const px = poolUsd ?? 0;
+    const v4Total = ps.filter((p) => p.venue === "v4").reduce((t, p) => t + (p.depthScore ?? 0), 0);
+    const mgr = v4ManagerUnits.get(a.symbol) ?? null;
+    for (const p of ps) {
+      if (p.venue === "v3") {
+        p.tvlUsd = p.tokenUnits == null ? null : p.tokenUnits * px + (p.quoteSideUsd ?? 0);
+      } else {
+        p.tvlUsd = mgr == null || v4Total <= 0 ? 0 : 2 * mgr * ((p.depthScore ?? 0) / v4Total) * px;
+        p.tvlBasis = "allocated";
+      }
+    }
+    const depthUsd = core.reduce((s, p) => s + (p.tvlUsd ?? 0), 0);
 
     const feed = feedBySymbol.get(a.symbol) ?? null;
     const premiumBps = poolUsd != null && feed && feed.price > 0
@@ -364,7 +444,7 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
       rawTotalSupply,
       adjTotalSupply: rawTotalSupply != null && uiMultiplier != null ? rawTotalSupply * uiMultiplier : null,
       feed, pools: ps,
-      best: best ? { venue: best.venue, id: best.id, quote: best.quote, priceUsd: best.priceUsd!, quoteDepthUsd: best.quoteDepthUsd } : null,
+      best: best ? { venue: best.venue, id: best.id, quote: best.quote, priceUsd: best.priceUsd!, tvlUsd: best.tvlUsd } : null,
       poolUsd, dispersionBps, livePools: core.length, depthUsd, quality, premiumBps,
       impliedMoveBps: phase.offHours && quality === "ok" ? premiumBps : null,
       note: !feed ? "no Chainlink reference — the AMM is the only price" : undefined,

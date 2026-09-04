@@ -65,7 +65,7 @@ server.registerTool(
       "Note that most tokens have no Chainlink feed at all — for those the AMM is the only on-chain price.",
     inputSchema: {
       withFeedOnly: z.boolean().optional().describe("only tokens that have a Chainlink reference feed"),
-      minDepthUsd: z.number().optional().describe("only tokens with at least this much consensus pool depth"),
+      minDepthUsd: z.number().optional().describe("only tokens with at least this much pool TVL behind the consensus price"),
       search: z.string().optional().describe("case-insensitive substring match on symbol or name"),
       limit: z.number().int().min(1).max(500).optional(),
     },
@@ -173,7 +173,10 @@ server.registerTool(
   {
     title: "Pool-level liquidity for a token",
     description:
-      "Every Uniswap pool for a token across V3 and V4, with the virtual quote depth backing each price. " +
+      "Every Uniswap pool for a token across V3 and V4, with the money actually in it. tvlUsd is exact " +
+      "for V3 (balanceOf on both sides) and apportioned for V4, whose reserves sit commingled in the " +
+      "singleton PoolManager and cannot be read per pool — tvlBasis says which. depthScore is liquidity, " +
+      "not dollars: useful for ranking, wrong as an amount. " +
       "V4 pools are storage entries in the singleton PoolManager, identified by poolId rather than an " +
       "address. Pools flagged `outlier` are more than 10% away from the depth-weighted median and do not " +
       "contribute to the consensus price — mostly never-traded pools opened at absurd fee tiers.",
@@ -189,7 +192,7 @@ server.registerTool(
     if (!r) return json({ error: `unknown symbol ${symbol}`, known: s.rows.length });
     const pools = (includeOutliers === false ? r.pools.filter((p) => !p.outlier) : r.pools)
       .slice()
-      .sort((a, b) => (b.quoteDepthUsd ?? 0) - (a.quoteDepthUsd ?? 0));
+      .sort((a, b) => (b.tvlUsd ?? 0) - (a.tvlUsd ?? 0));
     return json({
       asOf: asOf(s),
       symbol: r.symbol, token: r.token,

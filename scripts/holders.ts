@@ -86,7 +86,7 @@ process.stderr.write(`scanning ${symbol} (${asset.token}) Transfer logs to block
 let scanned = 0;
 const logs = await getLogsAdaptive(
   client, { address: asset.token, topics: [TRANSFER_TOPIC] }, 0n, block,
-  (_f, _t, n) => { scanned += n; if (scanned % 5000 < n) process.stderr.write(`  ${scanned} transfers\n`); },
+  (_f, hi, n) => { scanned += n; process.stderr.write(`  block ${hi} · ${scanned} transfers\n`); },
 );
 
 const bal = new Map<string, bigint>();

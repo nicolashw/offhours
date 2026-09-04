@@ -65,11 +65,12 @@ if (symbolFilter) {
     console.log(`  token ${r.token}  decimals ${r.decimals}  isin ${r.isin ?? "-"}`);
     console.log(`  uiMultiplier(on-chain) ${r.uiMultiplier ?? "-"}   restMultiplier ${r.restMultiplier ?? "-"}${r.multiplierMismatch ? "   <- MISMATCH" : ""}`);
     console.log(`  totalSupply raw ${r.rawTotalSupply?.toFixed(4) ?? "-"} -> multiplier-adjusted ${r.adjTotalSupply?.toFixed(4) ?? "-"}`);
-    console.log(`  total depth ${usd(r.depthUsd)} across ${r.livePools} live pools of ${r.pools.length}   quality ${r.quality}   dispersion ${r.dispersionBps ?? "-"}bps   premium ${bps(r.premiumBps)}bps`);
-    console.table([...r.pools].sort((x, y) => (y.quoteDepthUsd ?? 0) - (x.quoteDepthUsd ?? 0)).slice(0, 14).map((p) => ({
+    console.log(`  consensus TVL ${usd(r.depthUsd)} across ${r.livePools} live pools of ${r.pools.length}   quality ${r.quality}   dispersion ${r.dispersionBps ?? "-"}bps   premium ${bps(r.premiumBps)}bps`);
+    console.table([...r.pools].sort((x, y) => (y.tvlUsd ?? 0) - (x.tvlUsd ?? 0)).slice(0, 14).map((p) => ({
       venue: p.venue, quote: p.quote, fee: p.dynamicFee ? "dynamic" : p.fee,
       price: p.price.toPrecision(8), usd: p.priceUsd?.toFixed(4) ?? "-",
-      depth: usd(p.quoteDepthUsd), used: p.outlier ? "outlier" : (p.quoteDepthUsd ?? 0) > 0 ? "yes" : "empty", hooks: p.hooks && p.hooks !== "0x0000000000000000000000000000000000000000" ? p.hooks : "",
+      tvl: usd(p.tvlUsd), basis: p.tvlBasis ?? "-",
+      used: p.outlier ? "outlier" : (p.tvlUsd ?? 0) > 0 ? "yes" : "empty", hooks: p.hooks && p.hooks !== "0x0000000000000000000000000000000000000000" ? p.hooks : "",
       id: p.id.slice(0, 12) + "…",
     })));
   }
