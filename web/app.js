@@ -73,9 +73,10 @@ function drawDayBar(snap) {
               fill="${here ? "var(--market)" : "var(--dimmer)"}">${s.name}</text>`;
   }).join("");
 
-  const hours = [4, 9.5, 16, 20, 28].map((hh) => {
+  const hours = [4, 9.5, 16, 20, 28].map((hh, i, arr) => {
     const label = `${String(Math.floor(hh % 24)).padStart(2, "0")}:${hh % 1 ? "30" : "00"}`;
-    return `<text x="${Math.min(x(hh * 60), W - 26)}" y="${y - 7}">${label}</text>`;
+    const last = i === arr.length - 1;
+    return `<text x="${x(hh * 60)}" y="${y - 7}" text-anchor="${last ? "end" : "start"}">${label}</text>`;
   }).join("");
 
   const marker = weekend ? "" : `
@@ -173,10 +174,12 @@ function drawBand(snap, onPick) {
       </circle>`;
   };
 
-  // Label the deepest few, skipping any that would sit on top of another label.
+  // Label the deepest few. Two labels at similar x collide however far apart
+  // their marks are vertically, so separation is judged on x alone.
   const labelled = [];
-  for (const d of [...swarm].sort((a, b) => b.r.depthUsd - a.r.depthUsd).slice(0, 9)) {
-    if (!labelled.some((p) => Math.abs(p.cx - d.cx) < 40 && Math.abs(p.cy - d.cy) < 15)) labelled.push(d);
+  for (const d of [...swarm].sort((a, b) => b.r.depthUsd - a.r.depthUsd)) {
+    if (labelled.length >= 6) break;
+    if (!labelled.some((p) => Math.abs(p.cx - d.cx) < 54)) labelled.push(d);
   }
   const labels = labelled.map((d) =>
     `<text class="tick-label" x="${d.cx.toFixed(1)}" y="${(d.cy - d.r0 - 7).toFixed(1)}" text-anchor="middle">${d.r.symbol}</text>`).join("");
