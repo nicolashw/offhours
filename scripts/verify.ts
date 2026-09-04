@@ -45,7 +45,9 @@ const table = (title: string, rows: Row[]) => {
     state: r.feed?.state ?? "no feed",
     poolUsd: r.poolUsd?.toFixed(2) ?? "-",
     venue: r.best ? `${r.best.venue}/${r.best.quote}` : "-",
+    live: r.livePools,
     depth: usd(r.depthUsd),
+    disp: r.dispersionBps == null ? "-" : `${r.dispersionBps}`,
     premBps: bps(r.premiumBps),
     q: r.quality,
     pools: r.pools.length,
@@ -63,11 +65,11 @@ if (symbolFilter) {
     console.log(`  token ${r.token}  decimals ${r.decimals}  isin ${r.isin ?? "-"}`);
     console.log(`  uiMultiplier(on-chain) ${r.uiMultiplier ?? "-"}   restMultiplier ${r.restMultiplier ?? "-"}${r.multiplierMismatch ? "   <- MISMATCH" : ""}`);
     console.log(`  totalSupply raw ${r.rawTotalSupply?.toFixed(4) ?? "-"} -> multiplier-adjusted ${r.adjTotalSupply?.toFixed(4) ?? "-"}`);
-    console.log(`  total depth ${usd(r.depthUsd)}   quality ${r.quality}   premium ${bps(r.premiumBps)}bps`);
-    console.table([...r.pools].sort((x, y) => (y.quoteDepthUsd ?? 0) - (x.quoteDepthUsd ?? 0)).slice(0, 12).map((p) => ({
+    console.log(`  total depth ${usd(r.depthUsd)} across ${r.livePools} live pools of ${r.pools.length}   quality ${r.quality}   dispersion ${r.dispersionBps ?? "-"}bps   premium ${bps(r.premiumBps)}bps`);
+    console.table([...r.pools].sort((x, y) => (y.quoteDepthUsd ?? 0) - (x.quoteDepthUsd ?? 0)).slice(0, 14).map((p) => ({
       venue: p.venue, quote: p.quote, fee: p.dynamicFee ? "dynamic" : p.fee,
       price: p.price.toPrecision(8), usd: p.priceUsd?.toFixed(4) ?? "-",
-      depth: usd(p.quoteDepthUsd), liquidity: p.liquidity, hooks: p.hooks && p.hooks !== "0x0000000000000000000000000000000000000000" ? p.hooks : "",
+      depth: usd(p.quoteDepthUsd), used: p.outlier ? "outlier" : (p.quoteDepthUsd ?? 0) > 0 ? "yes" : "empty", hooks: p.hooks && p.hooks !== "0x0000000000000000000000000000000000000000" ? p.hooks : "",
       id: p.id.slice(0, 12) + "…",
     })));
   }

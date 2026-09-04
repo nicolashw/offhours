@@ -56,8 +56,11 @@ const v3PoolAbi = [
       { name: "unlocked", type: "bool" }] },
 ] as const;
 
-/** Below this much virtual quote depth, a pool price is indicative at best. */
-const MIN_DEPTH_USD = Number(process.env.MIN_DEPTH_USD ?? 5_000);
+/** Below this much virtual quote depth across all venues, a price is indicative at best. */
+const MIN_DEPTH_USD = Number(process.env.MIN_DEPTH_USD ?? 50_000);
+
+/** Relative distance from the depth-weighted median past which a pool stops being a price. */
+const OUTLIER_TOL = 0.10;
 
 const call = (target: Address, callData: Hex) => ({ target, callData });
 const cd = (abi: any, functionName: string) => encodeFunctionData({ abi, functionName }) as Hex;
@@ -92,6 +95,16 @@ export type PoolRead = {
    * current price, not withdrawable TVL.
    */
   quoteDepthUsd: number | null;
+  /**
+   * Priced more than OUTLIER_TOL away from the depth-weighted median of this
+   * token's live pools, so excluded from the consensus.
+   *
+   * V4 lets anyone open a pool at any fee, and they have: DELL alone has pools
+   * at 40%, 90% and 95% fee quoting $693, $3527 and $45 against a real market
+   * at $521. They hold a few hundred dollars each and never trade, but they are
+   * real initialised pools, so they are kept and flagged rather than hidden.
+   */
+  outlier?: boolean;
 };
 
 export type Row = {
@@ -105,8 +118,18 @@ export type Row = {
   feed: FeedRead | null;
   pools: PoolRead[];
   best: { venue: string; id: string; quote: string; priceUsd: number; quoteDepthUsd: number | null } | null;
+  /** Depth-weighted price across every live pool — the venue-blind number. */
   poolUsd: number | null;
-  /** Total virtual quote depth across every live pool for this token, in USD. */
+  /**
+   * Depth-weighted dispersion of pool prices, in bps of the consensus.
+   * Near zero means the venues are arbitraged against each other; a wide value
+   * means the "price" is really one pool's opinion and the premium below
+   * inherits that uncertainty.
+   */
+  dispersionBps: number | null;
+  /** Live pools that survived the outlier filter and set the consensus price. */
+  livePools: number;
+  /** Virtual quote depth across the pools that make up the consensus, in USD. */
   depthUsd: number;
   /**
    * How much the premium is worth believing:
@@ -130,6 +153,16 @@ export type Snapshot = {
   counts: { assets: number; withFeed: number; withPool: number; priced: number; trustworthy: number; beyondHeartbeat: number };
   rows: Row[];
 };
+
+/** Depth-weighted median price — the robust centre before outliers are judged. */
+function weightedMedian(items: Array<{ p: number; w: number }>): number | null {
+  const xs = items.filter((i) => i.w > 0 && isFinite(i.p) && i.p > 0).sort((a, b) => a.p - b.p);
+  const total = xs.reduce((s, i) => s + i.w, 0);
+  if (!total) return null;
+  let acc = 0;
+  for (const i of xs) { acc += i.w; if (acc >= total / 2) return i.p; }
+  return xs[xs.length - 1].p;
+}
 
 /** Depth backing the quoted price: the virtual quote reserve at the current tick. */
 function quoteDepth(sqrtPriceX96: bigint, liquidity: bigint, quoteIsToken0: boolean, quoteDec: number): number | null {
@@ -294,15 +327,35 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
     // Depth decides, not price: a drained pool still reports its last sqrtPrice.
     const priced = ps.filter((p) => p.priceUsd != null);
     const live = priced.filter((p) => (p.quoteDepthUsd ?? 0) > 0);
-    const best = [...(live.length ? live : priced)].sort((x, y) => (y.quoteDepthUsd ?? 0) - (x.quoteDepthUsd ?? 0))[0] ?? null;
-    const poolUsd = best?.priceUsd ?? null;
-    const depthUsd = live.reduce((s, p) => s + (p.quoteDepthUsd ?? 0), 0);
+    // Robust centre first, then judge each pool against it. Without this step a
+    // handful of never-traded 90%-fee V4 pools drag the consensus and blow up the
+    // dispersion of otherwise tightly-arbitraged names.
+    const med = weightedMedian(live.map((p) => ({ p: p.priceUsd!, w: p.quoteDepthUsd ?? 0 })));
+    if (med) for (const p of live) p.outlier = Math.abs(p.priceUsd! / med - 1) > OUTLIER_TOL;
+    const core = live.filter((p) => !p.outlier);
+
+    const best = [...(core.length ? core : live.length ? live : priced)]
+      .sort((x, y) => (y.quoteDepthUsd ?? 0) - (x.quoteDepthUsd ?? 0))[0] ?? null;
+    const depthUsd = core.reduce((s, p) => s + (p.quoteDepthUsd ?? 0), 0);
+
+    // Depth-weighted consensus rather than "whichever pool happens to be deepest":
+    // with 6.6k V4 pools alongside V3, a single venue's quote is an opinion, and the
+    // spread between the venues that agree is information in its own right.
+    let poolUsd: number | null = null;
+    let dispersionBps: number | null = null;
+    if (core.length && depthUsd > 0) {
+      poolUsd = core.reduce((s, p) => s + p.priceUsd! * (p.quoteDepthUsd ?? 0), 0) / depthUsd;
+      const varW = core.reduce((s, p) => s + (p.quoteDepthUsd ?? 0) * (p.priceUsd! - poolUsd!) ** 2, 0) / depthUsd;
+      dispersionBps = poolUsd > 0 ? Math.round((Math.sqrt(varW) / poolUsd) * 10_000) : null;
+    } else if (best) {
+      poolUsd = best.priceUsd ?? null; // every pool drained: report the fossil, flagged as such
+    }
 
     const feed = feedBySymbol.get(a.symbol) ?? null;
     const premiumBps = poolUsd != null && feed && feed.price > 0
       ? Math.round((poolUsd / feed.price - 1) * 10_000) : null;
     const quality: Row["quality"] =
-      premiumBps == null ? "none" : !live.length ? "empty" : depthUsd < MIN_DEPTH_USD ? "thin" : "ok";
+      premiumBps == null ? "none" : !core.length ? "empty" : depthUsd < MIN_DEPTH_USD ? "thin" : "ok";
 
     return {
       symbol: a.symbol, name: a.name, token: a.token, decimals: a.decimals, isin: a.isin,
@@ -311,7 +364,7 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
       adjTotalSupply: rawTotalSupply != null && uiMultiplier != null ? rawTotalSupply * uiMultiplier : null,
       feed, pools: ps,
       best: best ? { venue: best.venue, id: best.id, quote: best.quote, priceUsd: best.priceUsd!, quoteDepthUsd: best.quoteDepthUsd } : null,
-      poolUsd, depthUsd, quality, premiumBps,
+      poolUsd, dispersionBps, livePools: core.length, depthUsd, quality, premiumBps,
       impliedMoveBps: phase.offHours && quality === "ok" ? premiumBps : null,
       note: !feed ? "no Chainlink reference — the AMM is the only price" : undefined,
     };

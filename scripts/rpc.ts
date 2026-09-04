@@ -42,7 +42,10 @@ export function loadCfg(path = "config/chain.json"): Cfg {
 
 export function makeClient(cfg: Cfg): PublicClient {
   return createPublicClient({
-    transport: http(cfg.rpcUrl, { batch: { wait: 16, batchSize: 20 }, retryCount: 0, timeout: 60_000 }),
+    // No JSON-RPC batching: the node returns a malformed body for large batch
+    // payloads, which surfaces from viem as an unrelated undefined-read. One
+    // Multicall3 call per HTTP request is already the batching that matters.
+    transport: http(cfg.rpcUrl, { retryCount: 0, timeout: 60_000 }),
     batch: { multicall: false }, // we drive Multicall3 explicitly so failures stay per-call
   }) as PublicClient;
 }
@@ -130,7 +133,10 @@ export async function multicall(
     }
   };
   const out: CallResult[] = [];
-  for (let i = 0; i < calls.length; i += chunk) out.push(...(await run(calls.slice(i, i + chunk))));
+  for (let i = 0; i < calls.length; i += chunk) {
+    out.push(...(await run(calls.slice(i, i + chunk))));
+    if (i + chunk < calls.length) await sleep(30);
+  }
   return out;
 }
 
