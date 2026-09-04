@@ -331,18 +331,19 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
     });
   });
 
-  // ---- real money in each pool ----
+  // ---- reserves, for the "is this a real market" question ----
   //
-  // depthScore is liquidity, not dollars, and for tight ranges it overshoots by
-  // orders of magnitude — so the weighting and the "is this a real market" gate
-  // both run on actual reserves instead.
+  // depthScore is liquidity, not dollars: for the tight ranges these pools use
+  // it overshoots reserves by orders of magnitude, so it cannot answer how much
+  // money is actually behind a price. These balances can.
   //
   // V3 pools custody their own tokens, so this is two balanceOf calls. V4 pools
   // are storage entries and their reserves sit commingled in the singleton, so
   // per-pool reserves do not exist to be read: the manager's balance of the
   // token is split across that token's V4 pools by depthScore. Approximate, and
   // labelled as such, but bounded by a real balance rather than by an
-  // extrapolation from L.
+  // extrapolation from L. Valuation happens later, once there is a consensus
+  // price to value them at.
   const balOf = (token: Address, holder: Address) =>
     call(token, encodeFunctionData({ abi: erc20BalanceAbi, functionName: "balanceOf", args: [holder] }) as Hex);
 
@@ -386,7 +387,6 @@ export async function collect(cfg: Cfg = loadCfg()): Promise<Snapshot> {
       uiMultiplier != null && a.restMultiplier != null && Math.abs(uiMultiplier - a.restMultiplier) > 1e-9;
 
     const ps = (poolsBySymbol.get(a.symbol) ?? []).filter((p) => isFinite(p.price) && p.price > 0);
-    // Depth decides, not price: a drained pool still reports its last sqrtPrice.
     const priced = ps.filter((p) => p.priceUsd != null);
     // Liveness is decided by liquidity, not by reserves: tokens sent to a pool
     // address sit in balanceOf without making it a market, and a pool at an

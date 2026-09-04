@@ -197,7 +197,43 @@ argument for the staleness series: absent an uptime feed, observed feed age is t
 available proxy for sequencer health, and it has to be measured off-chain — which is exactly
 what the hourly snapshot does.
 
-### 13. Still open
+### 13. Correction: `L·√P` is not a dollar amount
+
+Section 8 introduced the virtual quote reserve as the depth behind a price, and it does separate
+a live pool from a drained one — but it is not TVL, and reading it as USD produced a number that
+cannot be true:
+
+| | |
+|---|---|
+| SGOV, deepest pool, `L·√P` in USD | **$1,187,900,000** |
+| SGOV total supply × price | **$1,549,000** |
+
+`L·√P` is the virtual reserve of a *full-range* position holding that liquidity. Real positions
+here are concentrated into very tight bands, so the figure overshoots by orders of magnitude —
+and unevenly, which meant the depth-weighted consensus was partly weighted by how narrow each
+LP's range was.
+
+Pools now carry both numbers under honest names:
+
+- `depthScore` — `L·√P`, kept for ranking and for the one thing it is reliable at: zero means
+  drained.
+- `tvlUsd` — actual money. `balanceOf` on both sides for V3, which custodies its own reserves.
+  V4 pools do not exist as contracts and their reserves sit commingled inside the singleton
+  PoolManager, so per-pool reserves cannot be read at all; the manager's balance of the token is
+  apportioned across that token's V4 pools by `depthScore` and doubled for the quote side.
+  `tvlBasis` records which of the two a reader is looking at.
+
+Order of operations turned out to matter as much as the formula. Valuing reserves first and then
+weighting by the result lets a pool sitting at an extreme tick value its own tokens absurdly and
+capture the median it is meant to be judged against — AMZN briefly printed a consensus price of
+3.4 × 10⁵⁰. The consensus is therefore formed on `depthScore`, and reserves are valued at that
+consensus afterwards. Liveness likewise stays with liquidity rather than balances: tokens sent
+to a pool address sit in `balanceOf` without making the pool a market.
+
+After the fix, SGOV reads $1.3M of pool TVL against a $1.55M supply, and the liquid names land
+where a reader would expect: NVDA $19.1M, QQQ $4.7M, MU $5.6M, DELL $853k.
+
+### 14. Still open
 
 - **Settler fills.** `RobinHoodSettler` (`0x39b38686A19836Ac10162c490E4558e120CbBE5f`) is a
   fourth price surface and the one retail actually receives. Decoding its fills and comparing
