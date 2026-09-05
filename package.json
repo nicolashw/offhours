@@ -14,7 +14,8 @@
     "backfill": "tsx scripts/backfill.ts",
     "lp": "tsx scripts/lp.ts",
     "venues": "tsx scripts/venues.ts",
-    "mm": "tsx scripts/mm.ts"
+    "mm": "tsx scripts/mm.ts",
+    "markout": "tsx scripts/markout.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
