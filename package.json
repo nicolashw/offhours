@@ -13,7 +13,8 @@
     "mcp": "tsx scripts/mcp.ts",
     "backfill": "tsx scripts/backfill.ts",
     "lp": "tsx scripts/lp.ts",
-    "venues": "tsx scripts/venues.ts"
+    "venues": "tsx scripts/venues.ts",
+    "mm": "tsx scripts/mm.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
