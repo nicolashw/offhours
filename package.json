@@ -12,7 +12,8 @@
     "holders": "tsx scripts/holders.ts",
     "mcp": "tsx scripts/mcp.ts",
     "backfill": "tsx scripts/backfill.ts",
-    "lp": "tsx scripts/lp.ts"
+    "lp": "tsx scripts/lp.ts",
+    "venues": "tsx scripts/venues.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
