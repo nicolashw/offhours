@@ -24,7 +24,11 @@
  * historical state is gone after half an hour, so it cannot be recovered any
  * other way.
  *
- * Usage: npm run mm -- --symbol AMC [--owner 0x...] [--from-blocks 5000000] [--json]
+ * The window defaults to the pool's own inception, found by walking the log
+ * index forward — starting mid-life counts withdrawals against deposits the scan
+ * never saw and calls the difference profit.
+ *
+ * Usage: npm run mm -- --symbol AMC [--owner 0x...] [--from-blocks auto] [--json]
  */
 
 import {
@@ -55,7 +59,7 @@ const args = process.argv.slice(2);
 const arg = (f: string, d: string) => (args.includes(f) ? args[args.indexOf(f) + 1] : d);
 const symbol = arg("--symbol", "AMC").toUpperCase();
 const owner = getAddress(arg("--owner", "0x73991a25C818Bf1f1128dEAaB1492D45638DE0D3"));
-const fromBlocks = BigInt(arg("--from-blocks", "5000000"));
+const fromArg = arg("--from-blocks", "auto");
 
 const cfg = loadCfg();
 const client = makeClient(cfg);
@@ -86,7 +90,35 @@ const name0 = quoteIsToken0 ? poolRow.quote : symbol;
 const name1 = quoteIsToken0 ? symbol : poolRow.quote;
 
 const head = await withRetry(() => client.getBlockNumber(), "bn");
-const from = head > fromBlocks ? head - fromBlocks : 0n;
+
+/**
+ * Walk forward in coarse buckets until one contains a Mint by anyone.
+ *
+ * The subtraction this script performs is only meaningful if the scan starts
+ * before the position did — a window that opens mid-life counts withdrawals
+ * against deposits it never saw, and reports the difference as profit. NVDA read
+ * +66% over six days that way. Historical state cannot settle it, so the pool's
+ * own first Mint has to be found in the log index.
+ */
+async function poolInception(): Promise<bigint> {
+  const STEP = 2_000_000n;
+  for (let lo = 0n; lo < head; lo += STEP) {
+    const hi = lo + STEP - 1n > head ? head : lo + STEP - 1n;
+    const found = await getLogsAdaptive(client, { address: pool, topics: [MINT] }, lo, hi, undefined, STEP);
+    if (found.length) {
+      const first = found.reduce((m: bigint, l: any) => {
+        const b = BigInt(l.blockNumber); return b < m ? b : m;
+      }, BigInt((found[0] as any).blockNumber));
+      process.stderr.write(`pool's first Mint at block ${first}\n`);
+      return lo;                                   // start of the bucket: safely before it
+    }
+  }
+  return 0n;
+}
+
+const from = fromArg === "auto"
+  ? await poolInception()
+  : (head > BigInt(fromArg) ? head - BigInt(fromArg) : 0n);
 process.stderr.write(`${symbol} pool ${pool}\nowner ${owner}\nscanning ${from}..${head}\n`);
 
 const pad = (a: Address) => `0x${a.slice(2).toLowerCase().padStart(64, "0")}` as Hex;
@@ -101,9 +133,11 @@ const collects = await scan([COLLECT, pad(owner)]);
 process.stderr.write(`  ${collects.length} collects\n`);
 if (!mints.length) throw new Error("no mints found for this owner — widen --from-blocks");
 
-const firstBlock = BigInt((mints as any[])[0].blockNumber);
-if (firstBlock - from < 20_000n) {
-  process.stderr.write(`  WARNING: first mint sits ${firstBlock - from} blocks into the window — widen --from-blocks or the opening position is unknown\n`);
+const firstBlock = (mints as any[]).reduce(
+  (m: bigint, l: any) => { const b = BigInt(l.blockNumber); return b < m ? b : m; },
+  BigInt((mints as any[])[0].blockNumber));
+if (firstBlock - from < 20_000n && fromArg !== "auto") {
+  process.stderr.write(`  WARNING: first mint sits ${firstBlock - from} blocks into the window — the opening position is unknown. Use --from-blocks auto.\n`);
 }
 const [bStart, bEnd] = await Promise.all([
   withRetry(() => client.getBlock({ blockNumber: firstBlock }), "bs"),
@@ -218,7 +252,14 @@ if (args.includes("--json")) {
   console.log(`this owner accounts for      ${coverage.t0.toFixed(1)}% / ${coverage.t1.toFixed(1)}% of that`);
   console.log(`capital currently deployed   ${u(capitalUsd)}`);
   console.log(`profit vs having just held   ${u(profitUsd)}   ${result.returnOnCapitalPct >= 0 ? "+" : ""}${result.returnOnCapitalPct.toFixed(2)}% on deployed capital over ${hours.toFixed(1)}h`);
-  console.log(`naive annualisation          ${result.annualisedPct >= 0 ? "+" : ""}${n(result.annualisedPct, 0)}%\n`);
+  console.log(`naive annualisation          ${result.annualisedPct >= 0 ? "+" : ""}${n(result.annualisedPct, 0)}%`);
+  // The reconstruction is only as good as its agreement with the pool, and the
+  // profits here are a few percent of capital — so when the two disagree by a
+  // comparable amount, the sign is not established and the output should say so.
+  const err = Math.max(Math.abs(coverage.t0 - 100), Math.abs(coverage.t1 - 100));
+  console.log(`\nprecision: the rebuilt position differs from the pool's balances by ${err.toFixed(1)}%,`);
+  console.log(`so this result carries roughly ${u(capitalUsd * err / 100)} of uncertainty` +
+    (err >= Math.abs(result.returnOnCapitalPct) ? ` — wider than the profit itself, so treat the sign as unresolved.` : `.`));
   console.log(`Both token columns priced at the current pool price; "net change" is what the operator`);
   console.log(`ended up with beyond what it put in. Fees accrued since its last Collect are not counted,`);
   console.log(`which understates the result by roughly one rebalancing interval.\n`);
